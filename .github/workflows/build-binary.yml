@@ -1,0 +1,28 @@
+name: Build Swift Binary
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Swift binary
+        run: bash swift/build.sh
+      - name: Rename binary
+        run: mv bin/ownscribe-audio bin/ownscribe-audio-arm64
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: bin/ownscribe-audio-arm64
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" bin/ownscribe-audio-arm64

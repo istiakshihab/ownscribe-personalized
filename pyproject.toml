@@ -1,0 +1,78 @@
+[project]
+name = "ownscribe"
+version = "0.15.0"
+description = "Fully local meeting transcription and summarization CLI"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Pascal Berrang", email = "git@p4l.dev" }
+]
+requires-python = ">=3.12,<3.14"
+keywords = ["meeting", "transcription", "summarization", "whisper", "local", "privacy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "click>=8.1",
+    "sounddevice>=0.5",
+    "soundfile>=0.13",
+    "mlx-whisper>=0.4",
+    # Kept for its diarization glue only (whisperx.diarize.DiarizationPipeline,
+    # whisperx.assign_word_speakers, whisperx.load_audio) — ASR now goes
+    # through mlx-whisper instead of whisperx's own faster-whisper backend.
+    "whisperx>=3.8",
+    "pyannote-audio>=4.0",
+    # torchaudio 2.9 removed list_audio_backends(), which pyannote-audio still
+    # calls; drop this cap and the <3.14 python cap once fixed upstream
+    # (pyannote/pyannote-audio#1974).
+    "torchaudio>=2.8,<2.9",
+    "llama-cpp-python>=0.3",
+    "huggingface-hub>=0.20",
+]
+
+[project.optional-dependencies]
+ollama = ["ollama>=0.4"]
+openai = ["openai>=1.0"]
+all = ["ollama>=0.4", "openai>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/paberr/ownscribe"
+Repository = "https://github.com/paberr/ownscribe"
+Issues = "https://github.com/paberr/ownscribe/issues"
+
+[project.scripts]
+ownscribe = "ownscribe.cli:cli"
+
+[dependency-groups]
+dev = [
+    "ollama>=0.4",
+    "openai>=1.0",
+    "pytest>=8.0",
+    "pytest-httpserver>=1.1",
+    "ruff>=0.9",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+markers = [
+    "macos: tests that require macOS",
+    "hardware: tests that require audio hardware",
+    "slow: slow-running tests",
+]

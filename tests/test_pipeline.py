@@ -1,0 +1,1193 @@
+"""Tests for pipeline orchestration."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+from unittest import mock
+
+from ownscribe.config import Config
+from ownscribe.transcription.models import Segment, TranscriptResult
+
+
+class TestCreateRecorder:
+    def test_coreaudio_when_available(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = ""
+
+        with mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_cls:
+            mock_cls.return_value.is_available.return_value = True
+            recorder = _create_recorder(config)
+            assert recorder == mock_cls.return_value
+
+    def test_fallback_to_sounddevice(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = ""
+
+        with (
+            mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_ca,
+            mock.patch("ownscribe.audio.sounddevice_recorder.SoundDeviceRecorder") as mock_sd,
+        ):
+            mock_ca.return_value.is_available.return_value = False
+            recorder = _create_recorder(config)
+            assert recorder == mock_sd.return_value
+
+    def test_sounddevice_when_device_set(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = "USB Mic"
+
+        with mock.patch("ownscribe.audio.sounddevice_recorder.SoundDeviceRecorder") as mock_sd:
+            recorder = _create_recorder(config)
+            assert recorder == mock_sd.return_value
+
+    def test_silence_timeout_passed_to_coreaudio(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = ""
+        config.audio.silence_timeout = 120
+
+        with mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_cls:
+            mock_cls.return_value.is_available.return_value = True
+            _create_recorder(config)
+            mock_cls.assert_called_once_with(mic=True, mic_device="", capture_mode="all", silence_timeout=120)
+
+    def test_capture_mode_passed_to_coreaudio(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = ""
+        config.audio.capture_mode = "picker"
+
+        with mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_cls:
+            mock_cls.return_value.is_available.return_value = True
+            _create_recorder(config)
+            mock_cls.assert_called_once_with(mic=True, mic_device="", capture_mode="picker", silence_timeout=300)
+
+    def test_silence_timeout_passed_to_sounddevice(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "sounddevice"
+        config.audio.device = "USB Mic"
+        config.audio.silence_timeout = 60
+
+        with mock.patch("ownscribe.audio.sounddevice_recorder.SoundDeviceRecorder") as mock_sd:
+            _create_recorder(config)
+            mock_sd.assert_called_once_with(device="USB Mic", silence_timeout=60)
+
+
+class TestUnsupportedAudioSettings:
+    """Flags the sounddevice backend cannot honour must warn, not be ignored."""
+
+    @staticmethod
+    def _create(config, capsys):
+        from ownscribe.pipeline import _create_recorder
+
+        with mock.patch("ownscribe.audio.sounddevice_recorder.SoundDeviceRecorder"):
+            _create_recorder(config)
+        return capsys.readouterr().err
+
+    def test_mic_device_warns(self, capsys):
+        config = Config()
+        config.audio.backend = "sounddevice"
+        config.audio.device = "USB Mic"
+        config.audio.mic_device = "MacBook Pro Microphone"
+
+        assert "--mic-device" in self._create(config, capsys)
+
+    def test_no_mic_warns(self, capsys):
+        config = Config()
+        config.audio.backend = "sounddevice"
+        config.audio.device = "USB Mic"
+        config.audio.mic = False
+
+        assert "--no-mic" in self._create(config, capsys)
+
+    def test_capture_mode_warns(self, capsys):
+        config = Config()
+        config.audio.backend = "sounddevice"
+        config.audio.device = "USB Mic"
+        config.audio.capture_mode = "picker"
+
+        assert "capture_mode" in self._create(config, capsys)
+
+    def test_defaults_do_not_warn(self, capsys):
+        config = Config()
+        config.audio.backend = "sounddevice"
+        config.audio.device = "USB Mic"
+
+        assert self._create(config, capsys) == ""
+
+    def test_coreaudio_backend_honours_the_flags(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = ""
+        config.audio.mic_device = "USB Mic"
+
+        with mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_cls:
+            mock_cls.return_value.is_available.return_value = True
+            _create_recorder(config)
+
+        assert mock_cls.call_args.kwargs["mic_device"] == "USB Mic"
+
+
+class TestFormatOutput:
+    def test_markdown_format(self, sample_transcript):
+        from ownscribe.pipeline import _format_output
+
+        config = Config()
+        config.output.format = "markdown"
+
+        transcript_str, summary_str = _format_output(config, sample_transcript)
+        assert "# Transcript" in transcript_str
+        assert summary_str is None
+
+    def test_markdown_with_summary(self, sample_transcript):
+        from ownscribe.pipeline import _format_output
+
+        config = Config()
+        config.output.format = "markdown"
+
+        transcript_str, summary_str = _format_output(config, sample_transcript, "A great meeting.")
+        assert "# Transcript" in transcript_str
+        assert "# Meeting Summary" in summary_str
+        assert "A great meeting." in summary_str
+
+    def test_json_format(self, sample_transcript):
+        from ownscribe.pipeline import _format_output
+
+        config = Config()
+        config.output.format = "json"
+
+        transcript_str, _summary_str = _format_output(config, sample_transcript)
+        parsed = json.loads(transcript_str)
+        assert "segments" in parsed
+
+    def test_json_summary_is_json(self, sample_transcript):
+        from ownscribe.pipeline import _format_output
+
+        config = Config()
+        config.output.format = "json"
+
+        _transcript_str, summary_str = _format_output(config, sample_transcript, "## Summary\nA great meeting.")
+
+        # The summary used to be written to summary.json as raw markdown.
+        assert json.loads(summary_str)["summary"] == "## Summary\nA great meeting."
+
+    def test_json_summary_written_to_disk_parses(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "json"
+        config.summarization.enabled = True
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = TranscriptResult(
+            segments=[Segment(text="Hello world.", start=0.0, end=1.5)],
+            language="en",
+            duration=1.5,
+        )
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+        mock_summarizer.generate_title.return_value = ""
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=True)
+
+        written = json.loads((tmp_path / "summary.json").read_text())
+        assert written["summary"] == "## Summary\nGood meeting."
+
+
+class TestSlugify:
+    def test_basic(self):
+        from ownscribe.pipeline import _slugify
+
+        assert _slugify("Q3 Budget Planning Review") == "q3-budget-planning-review"
+
+    def test_strips_special_chars(self):
+        from ownscribe.pipeline import _slugify
+
+        assert _slugify("Hello, World! @#$") == "hello-world"
+
+    def test_truncates_to_max_length(self):
+        from ownscribe.pipeline import _slugify
+
+        result = _slugify("a " * 100, max_length=10)
+        assert len(result) <= 10
+
+    def test_empty_input(self):
+        from ownscribe.pipeline import _slugify
+
+        assert _slugify("") == ""
+
+    def test_colons_removed(self):
+        from ownscribe.pipeline import _slugify
+
+        assert _slugify("Meeting: Budget Review") == "meeting-budget-review"
+
+
+class TestGenerateTitleSlug:
+    def test_returns_slug(self):
+        from ownscribe.pipeline import _generate_title_slug
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.generate_title.return_value = "Budget Review"
+
+        assert _generate_title_slug("summary text", mock_summarizer) == "budget-review"
+
+    def test_returns_empty_on_empty_slug(self):
+        from ownscribe.pipeline import _generate_title_slug
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.generate_title.return_value = "!!!"  # slugifies to empty
+
+        assert _generate_title_slug("summary", mock_summarizer) == ""
+
+    def test_returns_empty_on_llm_failure(self):
+        from ownscribe.pipeline import _generate_title_slug
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.generate_title.side_effect = Exception("LLM down")
+
+        assert _generate_title_slug("summary", mock_summarizer) == ""
+
+
+class TestRenameOutputDir:
+    def test_renames_when_target_does_not_exist(self, tmp_path):
+        from ownscribe.pipeline import _rename_output_dir
+
+        source = tmp_path / "2026-01-01_1200"
+        source.mkdir()
+        (source / "transcript.md").write_text("hi")
+
+        result = _rename_output_dir(source, "budget-review")
+
+        expected = tmp_path / "2026-01-01_1200_budget-review"
+        assert result == expected
+        assert expected.exists()
+        assert not source.exists()
+
+    def test_skips_cleanly_when_target_exists_with_content(self, tmp_path, caplog):
+        from pathlib import Path
+
+        from ownscribe.pipeline import _rename_output_dir
+
+        source = tmp_path / "2026-01-01_1200"
+        source.mkdir()
+        (source / "transcript.md").write_text("hi")
+
+        target = tmp_path / "2026-01-01_1200_budget-review"
+        target.mkdir()
+        (target / "unrelated.txt").write_text("already here")
+
+        with mock.patch.object(Path, "rename") as mock_rename, caplog.at_level(logging.DEBUG):
+            result = _rename_output_dir(source, "budget-review")
+
+        mock_rename.assert_not_called()
+        assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+        assert result == source
+        assert source.exists()
+        assert (target / "unrelated.txt").read_text() == "already here"
+
+    def test_renames_when_target_exists_but_is_empty(self, tmp_path):
+        from ownscribe.pipeline import _rename_output_dir
+
+        source = tmp_path / "2026-01-01_1200"
+        source.mkdir()
+        (source / "transcript.md").write_text("hi")
+
+        target = tmp_path / "2026-01-01_1200_budget-review"
+        target.mkdir()
+
+        result = _rename_output_dir(source, "budget-review")
+
+        assert result == target
+        assert (target / "transcript.md").read_text() == "hi"
+
+    def test_returns_original_on_unexpected_os_error(self, tmp_path, caplog):
+        from pathlib import Path
+
+        from ownscribe.pipeline import _rename_output_dir
+
+        source = tmp_path / "2026-01-01_1200"
+        source.mkdir()
+
+        with (
+            mock.patch.object(Path, "rename", side_effect=OSError("cross-device link")),
+            caplog.at_level(logging.DEBUG),
+        ):
+            result = _rename_output_dir(source, "budget-review")
+
+        assert result == source
+        assert source.exists()
+        warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "cross-device link" in warnings[0].getMessage()
+        # exc_info would print a traceback to stderr, which reads like a crash.
+        assert warnings[0].exc_info is None
+
+    def test_returns_original_when_target_is_a_file(self, tmp_path, caplog):
+        from ownscribe.pipeline import _rename_output_dir
+
+        source = tmp_path / "2026-01-01_1200"
+        source.mkdir()
+        (source / "transcript.md").write_text("hi")
+
+        target = tmp_path / "2026-01-01_1200_budget-review"
+        target.write_text("not a directory")
+
+        with caplog.at_level(logging.DEBUG):
+            result = _rename_output_dir(source, "budget-review")
+
+        assert result == source
+        assert (source / "transcript.md").read_text() == "hi"
+        assert target.read_text() == "not a directory"
+        assert [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
+class TestDoTranscribeAndSummarize:
+    """Test _do_transcribe_and_summarize with mocked transcriber/summarizer."""
+
+    def _make_transcript(self) -> TranscriptResult:
+        return TranscriptResult(
+            segments=[Segment(text="Hello world.", start=0.0, end=1.5)],
+            language="en",
+            duration=1.5,
+        )
+
+    def test_summarizer_receives_speaker_labels(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = True
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = TranscriptResult(
+            segments=[
+                Segment(text="Let's start.", start=0.0, end=1.0, speaker="SPEAKER_00"),
+                Segment(text="I'll take the deploy.", start=1.0, end=2.5, speaker="SPEAKER_01"),
+            ],
+            language="en",
+            duration=2.5,
+        )
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=True)
+
+        summarized = mock_summarizer.summarize.call_args[0][0]
+        assert summarized == "SPEAKER_00: Let's start.\nSPEAKER_01: I'll take the deploy."
+
+    def test_transcribe_only(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        with mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=False)
+
+        assert (tmp_path / "transcript.md").exists()
+        assert not (tmp_path / "summary.md").exists()
+
+    def test_transcribe_and_summarize(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = True
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=True)
+
+        assert (tmp_path / "transcript.md").exists()
+        assert (tmp_path / "summary.md").exists()
+        assert "Summary" in (tmp_path / "summary.md").read_text()
+
+    def test_summarizer_unavailable_skips_gracefully(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = True
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = False
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=True)
+
+        assert (tmp_path / "transcript.md").exists()
+        assert not (tmp_path / "summary.md").exists()
+
+    def test_json_output_format(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "json"
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        with mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=False)
+
+        assert (tmp_path / "transcript.json").exists()
+        assert not (tmp_path / "transcript.md").exists()
+
+    def test_keep_recording_false_deletes_wav(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.output.keep_recording = False
+        audio_path = tmp_path / "recording.wav"
+        audio_path.write_bytes(b"fake audio data")
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        with mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=False)
+
+        assert (tmp_path / "transcript.md").exists()
+        assert not audio_path.exists()
+
+    def test_keep_recording_true_keeps_wav(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.output.keep_recording = True
+        audio_path = tmp_path / "recording.wav"
+        audio_path.write_bytes(b"fake audio data")
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        with mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=False)
+
+        assert (tmp_path / "transcript.md").exists()
+        assert audio_path.exists()
+
+    def test_summarization_failure_preserves_transcript(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = True
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.side_effect = Exception("GPU OOM")
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=True)
+
+        assert (tmp_path / "transcript.md").exists()
+        assert "Hello world." in (tmp_path / "transcript.md").read_text()
+        assert not (tmp_path / "summary.md").exists()
+
+    def test_separate_audio_dir_renamed_alongside_out_dir(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = True
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = str(tmp_path / "audio-cache")
+
+        out_dir = tmp_path / "notes" / "2026-01-01_1200"
+        out_dir.mkdir(parents=True)
+        audio_dir = tmp_path / "audio-cache" / "2026-01-01_1200"
+        audio_dir.mkdir(parents=True)
+        audio_path = audio_dir / "recording.wav"
+        audio_path.write_bytes(b"fake audio data")
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+        mock_summarizer.generate_title.return_value = "Budget Review"
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=True)
+
+        renamed_out_dir = out_dir.parent / "2026-01-01_1200_budget-review"
+        renamed_audio_dir = audio_dir.parent / "2026-01-01_1200_budget-review"
+        assert (renamed_out_dir / "transcript.md").exists()
+        assert (renamed_out_dir / "summary.md").exists()
+        assert (renamed_audio_dir / "recording.wav").exists()
+        assert not out_dir.exists()
+        assert not audio_dir.exists()
+
+    def test_keep_recording_false_deletes_from_separate_audio_dir(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.output.keep_recording = False
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = str(tmp_path / "audio-cache")
+
+        out_dir = tmp_path / "notes" / "2026-01-01_1200"
+        out_dir.mkdir(parents=True)
+        audio_dir = tmp_path / "audio-cache" / "2026-01-01_1200"
+        audio_dir.mkdir(parents=True)
+        audio_path = audio_dir / "recording.wav"
+        audio_path.write_bytes(b"fake audio data")
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        with mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
+
+        assert (out_dir / "transcript.md").exists()
+        assert not audio_path.exists()
+        assert not audio_dir.exists()
+
+    def test_colocated_audio_follows_rename_despite_separate_audio_dir(self, tmp_path):
+        """Resuming a directory that holds its own recording (made before
+        audio_dir was configured) must follow out_dir's rename, not try to
+        rename the audio's directory a second time."""
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.output.keep_recording = False
+        config.summarization.enabled = True
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = str(tmp_path / "audio-cache")
+
+        out_dir = tmp_path / "notes" / "2026-01-01_1200"
+        out_dir.mkdir(parents=True)
+        audio_path = out_dir / "recording.wav"
+        audio_path.write_bytes(b"fake audio data")
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._make_transcript()
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+        mock_summarizer.generate_title.return_value = "Budget Review"
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=True)
+
+        renamed_out_dir = out_dir.parent / "2026-01-01_1200_budget-review"
+        assert (renamed_out_dir / "transcript.md").exists()
+        assert (renamed_out_dir / "summary.md").exists()
+        assert not (renamed_out_dir / "recording.wav").exists()
+        assert not out_dir.exists()
+
+
+class TestRunWarmup:
+    def test_run_warmup_calls_prepare_models(self):
+        from ownscribe.pipeline import run_warmup
+
+        config = Config()
+        config.transcription.language = "en"
+
+        mock_transcriber = mock.MagicMock()
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            run_warmup(config)
+
+        mock_transcriber.prepare_models.assert_called_once_with(language="en")
+
+    def test_run_warmup_enables_prepare_step_in_progress(self):
+        from ownscribe.pipeline import run_warmup
+
+        config = Config()
+        mock_transcriber = mock.MagicMock()
+        fake_progress = mock.MagicMock()
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline.PipelineProgress") as mock_progress_cls,
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            mock_progress_cls.return_value.__enter__.return_value = fake_progress
+            run_warmup(config)
+
+        _, kwargs = mock_progress_cls.call_args
+        assert kwargs["include_prepare"] is True
+        assert kwargs["transcribe"] is False
+        assert kwargs["download_summarizer"] is True
+
+    def test_run_warmup_downloads_summarizer_with_progress(self):
+        from ownscribe.pipeline import run_warmup
+
+        config = Config()
+        config.summarization.enabled = True
+        config.summarization.backend = "local"
+        config.summarization.model = "phi-4-mini"
+
+        mock_transcriber = mock.MagicMock()
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model") as mock_ensure,
+        ):
+            run_warmup(config)
+
+        mock_ensure.assert_called_once()
+        _, kwargs = mock_ensure.call_args
+        assert kwargs.get("on_progress") is not None
+
+    def test_run_warmup_skips_summarizer_download_when_not_local(self):
+        from ownscribe.pipeline import run_warmup
+
+        config = Config()
+        config.summarization.enabled = True
+        config.summarization.backend = "ollama"
+
+        mock_transcriber = mock.MagicMock()
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model") as mock_ensure,
+        ):
+            run_warmup(config)
+
+        mock_ensure.assert_not_called()
+
+
+class TestRunPipelineAudioLocation:
+    """Test that run_pipeline records into the configured audio_dir."""
+
+    def _make_recorder_mock(self):
+        recorder = mock.MagicMock()
+        recorder.is_recording = False  # skip the recording loop immediately
+        recorder.is_muted = False
+        recorder.silence_timed_out = False
+        recorder.silence_warning = False
+
+        def _start(path):
+            # Must exceed _WAV_HEADER_SIZE (44 bytes) or run_pipeline treats it as empty.
+            path.write_bytes(b"fake audio data, definitely more than 44 bytes")
+
+        recorder.start.side_effect = _start
+        return recorder
+
+    def test_audio_recorded_into_separate_audio_dir(self, tmp_path):
+        from ownscribe.pipeline import run_pipeline
+
+        config = Config()
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = str(tmp_path / "audio-cache")
+
+        mock_recorder = self._make_recorder_mock()
+
+        with (
+            mock.patch("ownscribe.pipeline._create_recorder", return_value=mock_recorder),
+            mock.patch("ownscribe.pipeline._do_transcribe_and_summarize") as mock_ts,
+        ):
+            run_pipeline(config)
+
+        # The recorder was pointed at a file under audio_dir, not dir.
+        audio_path = mock_recorder.start.call_args[0][0]
+        assert audio_path.is_relative_to(tmp_path / "audio-cache")
+        assert not audio_path.is_relative_to(tmp_path / "notes")
+        assert audio_path.exists()
+
+        # Downstream processing still receives the audio dir's out_dir counterpart.
+        called_audio_path, called_out_dir = mock_ts.call_args[0][1], mock_ts.call_args[0][2]
+        assert called_audio_path == audio_path
+        assert called_out_dir.is_relative_to(tmp_path / "notes")
+        assert called_out_dir.name == audio_path.parent.name
+
+    def test_no_audio_captured_hints_at_no_mic(self, tmp_path, capsys):
+        from ownscribe.pipeline import run_pipeline
+
+        config = Config()
+        config.output.dir = str(tmp_path / "notes")
+
+        recorder = self._make_recorder_mock()
+        recorder.start.side_effect = lambda path: path.write_bytes(b"")
+
+        with (
+            mock.patch("ownscribe.pipeline._create_recorder", return_value=recorder),
+            contextlib.suppress(SystemExit),
+        ):
+            run_pipeline(config)
+
+        assert "--no-mic" in capsys.readouterr().err
+
+    def test_no_audio_captured_without_mic_omits_hint(self, tmp_path, capsys):
+        from ownscribe.pipeline import run_pipeline
+
+        config = Config()
+        config.output.dir = str(tmp_path / "notes")
+        config.audio.mic = False
+
+        recorder = self._make_recorder_mock()
+        recorder.start.side_effect = lambda path: path.write_bytes(b"")
+
+        with (
+            mock.patch("ownscribe.pipeline._create_recorder", return_value=recorder),
+            contextlib.suppress(SystemExit),
+        ):
+            run_pipeline(config)
+
+        assert "--no-mic" not in capsys.readouterr().err
+
+    def test_audio_recorded_into_dir_when_audio_dir_unset(self, tmp_path):
+        from ownscribe.pipeline import run_pipeline
+
+        config = Config()
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = ""
+
+        mock_recorder = self._make_recorder_mock()
+
+        with (
+            mock.patch("ownscribe.pipeline._create_recorder", return_value=mock_recorder),
+            mock.patch("ownscribe.pipeline._do_transcribe_and_summarize"),
+        ):
+            run_pipeline(config)
+
+        audio_path = mock_recorder.start.call_args[0][0]
+        assert audio_path.is_relative_to(tmp_path / "notes")
+        assert audio_path.parent.parent == tmp_path / "notes"
+
+
+class TestRunTranscribeColocation:
+    """Test that run_transcribe saves output alongside the input file."""
+
+    def test_transcript_saved_next_to_audio(self, tmp_path):
+        from ownscribe.pipeline import run_transcribe
+
+        audio_dir = tmp_path / "meetings" / "2026-01-01_1200"
+        audio_dir.mkdir(parents=True)
+        audio_path = audio_dir / "recording.wav"
+        audio_path.touch()
+
+        config = Config()
+        config.output.format = "markdown"
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = TranscriptResult(
+            segments=[Segment(text="Test.", start=0.0, end=1.0)],
+            language="en",
+            duration=1.0,
+        )
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.pipeline._check_audio_silence"),
+        ):
+            run_transcribe(config, str(audio_path))
+
+        assert (audio_dir / "transcript.md").exists()
+
+
+class TestRunSummarizeTranscriptText:
+    """run_summarize must normalise the saved transcript, not paste the file in."""
+
+    @staticmethod
+    def _summarize(config, tx_path):
+        from ownscribe.pipeline import run_summarize
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+        mock_summarizer.generate_title.return_value = ""
+
+        with (
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            run_summarize(config, str(tx_path))
+
+        return mock_summarizer.summarize.call_args[0][0]
+
+    def test_markdown_timestamps_are_stripped(self, tmp_path):
+        from ownscribe.output.markdown import format_transcript
+
+        tx_path = tmp_path / "transcript.md"
+        tx_path.write_text(
+            format_transcript(
+                TranscriptResult(
+                    segments=[
+                        Segment(text="Let's start.", start=0.0, end=1.0, speaker="SPEAKER_00"),
+                        Segment(text="Agreed.", start=1.0, end=2.0, speaker="SPEAKER_01"),
+                    ],
+                    language="en",
+                    duration=2.0,
+                )
+            )
+        )
+
+        summarized = self._summarize(Config(), tx_path)
+
+        assert summarized == "SPEAKER_00: Let's start.\nSPEAKER_01: Agreed."
+        assert "[00:00]" not in summarized
+        assert "# Transcript" not in summarized
+
+    def test_json_transcript_is_not_handed_to_the_llm_raw(self, tmp_path):
+        from ownscribe.output.json_output import format_transcript_json
+        from ownscribe.transcription.models import Word
+
+        tx_path = tmp_path / "transcript.json"
+        tx_path.write_text(
+            format_transcript_json(
+                TranscriptResult(
+                    segments=[
+                        Segment(
+                            text="Budget is approved.",
+                            start=0.0,
+                            end=2.0,
+                            speaker="SPEAKER_00",
+                            words=[Word(text="Budget", start=0.0, end=0.4, score=0.98)],
+                        )
+                    ],
+                    language="en",
+                    duration=2.0,
+                )
+            )
+        )
+
+        summarized = self._summarize(Config(), tx_path)
+
+        assert summarized == "SPEAKER_00: Budget is approved."
+        assert "score" not in summarized
+        assert "segments" not in summarized
+
+    def test_plain_text_file_is_passed_through(self, tmp_path):
+        tx_path = tmp_path / "notes.txt"
+        tx_path.write_text("Just some notes I typed myself.")
+
+        assert self._summarize(Config(), tx_path) == "Just some notes I typed myself."
+
+
+class TestRunSummarizeColocation:
+    """Test that run_summarize saves output alongside the input file."""
+
+    def test_summary_saved_next_to_transcript(self, tmp_path):
+        from ownscribe.pipeline import run_summarize
+
+        tx_dir = tmp_path / "meetings" / "2026-01-01_1200"
+        tx_dir.mkdir(parents=True)
+        tx_path = tx_dir / "transcript.md"
+        tx_path.write_text("# Transcript\nHello world.")
+
+        config = Config()
+        config.summarization.enabled = True
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+        mock_summarizer.generate_title.return_value = "test-title"
+
+        with (
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            run_summarize(config, str(tx_path))
+
+        renamed_dir = tx_dir.parent / f"{tx_dir.name}_test-title"
+        assert (renamed_dir / "summary.md").exists()
+
+    def test_renames_matching_audio_dir_inside_output_tree(self, tmp_path):
+        from ownscribe.pipeline import run_summarize
+
+        tx_dir = tmp_path / "notes" / "2026-01-01_1200"
+        tx_dir.mkdir(parents=True)
+        tx_path = tx_dir / "transcript.md"
+        tx_path.write_text("# Transcript\nHello world.")
+
+        audio_dir = tmp_path / "audio-cache" / "2026-01-01_1200"
+        audio_dir.mkdir(parents=True)
+        (audio_dir / "recording.wav").write_bytes(b"fake audio data")
+
+        config = Config()
+        config.summarization.enabled = True
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = str(tmp_path / "audio-cache")
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+        mock_summarizer.generate_title.return_value = "test-title"
+
+        with (
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            run_summarize(config, str(tx_path))
+
+        renamed_audio_dir = audio_dir.parent / f"{audio_dir.name}_test-title"
+        assert (renamed_audio_dir / "recording.wav").exists()
+        assert not audio_dir.exists()
+
+    def test_leaves_audio_dir_alone_for_transcript_outside_output_tree(self, tmp_path):
+        """A same-named directory under audio_dir must not be renamed when the
+        summarized transcript does not belong to the output tree."""
+        from ownscribe.pipeline import run_summarize
+
+        tx_dir = tmp_path / "elsewhere" / "2026-01-01_1200"
+        tx_dir.mkdir(parents=True)
+        tx_path = tx_dir / "transcript.md"
+        tx_path.write_text("# Transcript\nHello world.")
+
+        unrelated_audio_dir = tmp_path / "audio-cache" / "2026-01-01_1200"
+        unrelated_audio_dir.mkdir(parents=True)
+
+        config = Config()
+        config.summarization.enabled = True
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = str(tmp_path / "audio-cache")
+
+        mock_summarizer = mock.MagicMock()
+        mock_summarizer.is_available.return_value = True
+        mock_summarizer.summarize.return_value = "## Summary\nGood meeting."
+        mock_summarizer.generate_title.return_value = "test-title"
+
+        with (
+            mock.patch("ownscribe.pipeline.create_summarizer", return_value=mock_summarizer),
+            mock.patch("ownscribe.summarization.llama_cpp_summarizer._ensure_model"),
+        ):
+            run_summarize(config, str(tx_path))
+
+        renamed_dir = tx_dir.parent / f"{tx_dir.name}_test-title"
+        assert (renamed_dir / "summary.md").exists()
+        assert unrelated_audio_dir.exists()
+        assert not (unrelated_audio_dir.parent / f"{tx_dir.name}_test-title").exists()
+
+
+class TestResume:
+    """Test run_resume artifact detection and dispatch."""
+
+    def test_nothing_to_resume(self, tmp_path):
+        from ownscribe.pipeline import run_resume
+
+        (tmp_path / "transcript.md").write_text("hello")
+        (tmp_path / "summary.md").write_text("summary")
+
+        config = Config()
+        run_resume(config, str(tmp_path))
+        # Should exit cleanly without error
+
+    def test_error_no_audio_no_transcript(self, tmp_path):
+        from ownscribe.pipeline import run_resume
+
+        config = Config()
+        with mock.patch("sys.exit", side_effect=SystemExit(1)), contextlib.suppress(SystemExit):
+            run_resume(config, str(tmp_path))
+
+    def test_resumes_summarize_only(self, tmp_path):
+        from ownscribe.pipeline import run_resume
+
+        (tmp_path / "transcript.md").write_text("# Transcript\nHello.")
+
+        config = Config()
+        config.summarization.enabled = True
+
+        with mock.patch("ownscribe.pipeline.run_summarize") as mock_sum:
+            run_resume(config, str(tmp_path))
+            mock_sum.assert_called_once_with(config, str(tmp_path / "transcript.md"))
+
+    def test_resumes_transcribe_and_summarize(self, tmp_path):
+        from ownscribe.pipeline import run_resume
+
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+
+        config = Config()
+
+        with mock.patch("ownscribe.pipeline._do_transcribe_and_summarize") as mock_ts:
+            run_resume(config, str(tmp_path))
+            mock_ts.assert_called_once_with(config, audio_path, tmp_path)
+
+    def test_finds_non_wav_audio(self, tmp_path):
+        from ownscribe.pipeline import run_resume
+
+        audio_path = tmp_path / "meeting.mp3"
+        audio_path.touch()
+
+        config = Config()
+
+        with mock.patch("ownscribe.pipeline._do_transcribe_and_summarize") as mock_ts:
+            run_resume(config, str(tmp_path))
+            mock_ts.assert_called_once_with(config, audio_path, tmp_path)
+
+    def test_finds_audio_in_separate_audio_dir(self, tmp_path):
+        from ownscribe.pipeline import run_resume
+
+        text_dir = tmp_path / "notes" / "2026-01-01_1200"
+        text_dir.mkdir(parents=True)
+        audio_dir = tmp_path / "audio-cache" / "2026-01-01_1200"
+        audio_dir.mkdir(parents=True)
+        audio_path = audio_dir / "recording.wav"
+        audio_path.touch()
+
+        config = Config()
+        config.output.dir = str(tmp_path / "notes")
+        config.output.audio_dir = str(tmp_path / "audio-cache")
+
+        with mock.patch("ownscribe.pipeline._do_transcribe_and_summarize") as mock_ts:
+            run_resume(config, str(text_dir))
+            mock_ts.assert_called_once_with(config, audio_path, text_dir)
+
+    def test_finds_json_transcript(self, tmp_path):
+        from ownscribe.pipeline import run_resume
+
+        (tmp_path / "transcript.json").write_text('{"segments": []}')
+
+        config = Config()
+
+        with mock.patch("ownscribe.pipeline.run_summarize") as mock_sum:
+            run_resume(config, str(tmp_path))
+            mock_sum.assert_called_once_with(config, str(tmp_path / "transcript.json"))
+
+
+class TestVaultFilingConfirmation:
+    """The confirm-before-filing step added to _do_transcribe_and_summarize."""
+
+    def _run(self, tmp_path, *, isatty: bool, confirm_before_filing: bool, confirm_return: bool = True):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+        from ownscribe.vault_filing import PreparedNote
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = False
+        config.obsidian.enabled = True
+        config.obsidian.confirm_before_filing = confirm_before_filing
+        config.obsidian.vault_dir = str(tmp_path / "vault")
+
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = TranscriptResult(
+            segments=[Segment(text="Hello world.", start=0.0, end=1.5)],
+            language="en",
+            duration=1.5,
+        )
+        prepared = PreparedNote(
+            parsed={"title": "Test Meeting", "category": "Personal", "tags": ["personal"], "body_markdown": "body"},
+            folder_name="out",
+            date="2026-08-19",
+        )
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.vault_filing.prepare_note", return_value=prepared) as mock_prepare,
+            mock.patch("sys.stdin.isatty", return_value=isatty),
+            mock.patch("click.confirm", return_value=confirm_return) as mock_confirm,
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
+
+        mock_prepare.assert_called_once()
+        written = list((tmp_path / "vault" / "Personal").glob("*.md"))
+        return mock_confirm, written
+
+    def test_confirmed_writes_the_note(self, tmp_path):
+        mock_confirm, written = self._run(tmp_path, isatty=True, confirm_before_filing=True, confirm_return=True)
+        mock_confirm.assert_called_once()
+        assert len(written) == 1
+        assert "Test Meeting" in written[0].read_text()
+
+    def test_declined_does_not_write(self, tmp_path):
+        mock_confirm, written = self._run(tmp_path, isatty=True, confirm_before_filing=True, confirm_return=False)
+        mock_confirm.assert_called_once()
+        assert written == []
+
+    def test_non_tty_skips_prompt_and_writes(self, tmp_path):
+        mock_confirm, written = self._run(tmp_path, isatty=False, confirm_before_filing=True)
+        mock_confirm.assert_not_called()
+        assert len(written) == 1
+
+    def test_confirm_disabled_skips_prompt_and_writes(self, tmp_path):
+        mock_confirm, written = self._run(tmp_path, isatty=True, confirm_before_filing=False)
+        mock_confirm.assert_not_called()
+        assert len(written) == 1

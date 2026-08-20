@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --only-group dev
+      - run: uv run ruff check src/ tests/
+
+  test:
+    runs-on: macos-14
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build Swift helper
+        run: bash swift/build.sh
+      - run: uv sync --dev
+      - run: uv run pytest -v -m "not hardware"

@@ -1,0 +1,51 @@
+You are summarizing a meeting transcript into a structured note for an Obsidian vault. You have no tools available — respond with plain text only.
+
+## Meeting metadata
+Folder name: {folder_name}
+Meeting name (often just a timestamp — don't treat it as the real topic): {meeting_name}
+
+{diarization_note}
+
+## Categories (pick exactly ONE)
+- Portrait — an academic-assignment/portfolio-grading web tool project (team submissions, peer review, FERPA, Canvas integration, instructor dashboard, Christopher/Yolanda/AJ/Chris are collaborators on this)
+- Research — PhD research: papers, surveys, GenAI-in-education studies, advisor meetings, conference (COLM) work, prompt-injection/LLM security work
+- Oregon State University — coursework, TA duties, OSU admin (not the Research or Portrait threads specifically)
+- Job Search — job/internship applications, interviews, recruiting
+- Monolog — a separate side-project: an AI meeting-transcription/note-taking product idea (distinct from Portrait)
+- Personal — non-work personal life
+- Podcast — the TAGS podcast side project
+
+If none clearly fit, use "Unknown".
+
+## Instructions
+1. Read the full transcript below.
+2. Write a topic-based summary as markdown: use `### N. Topic Name` sections, in the same style as a professional meeting-minutes writeup (see example structure: Attendees/Format line if attendees can be inferred, then numbered topic sections with bullet points, bold key terms/decisions).
+3. Follow the diarization guidance above when attributing statements to specific people — never invent who said what beyond what the transcript and diarization actually support.
+4. Extract a `## Action Items` section. Group by named attendee (`### <Name>`) only where you're confident who owns the action; otherwise list items directly under the `## Action Items` heading with no subheading at all — do not create a generic "### Action Items" subheading, that's redundant with the section title itself. Use `- [ ] ...` for open items and `- [x] ...` for anything explicitly completed during the meeting itself.
+5. Pick exactly one category from the list above.
+6. Suggest 2-4 short lowercase-kebab-case tags (always include the category as a tag, e.g. "portrait", plus "meeting", plus anything else specific and useful, e.g. "ferpa", "deployment").
+7. Suggest a short, descriptive title (not just "Meeting Notes" — describe what was actually discussed/decided, matching the style of: "Compliance and Team Assignment Wizard Meeting", "NERSC Presentation Review", "COLM Paper Confidence Control").
+
+Do NOT attempt to determine the date yourself — it is parsed separately from the recording's own metadata.
+
+## Output format
+Do NOT use JSON. Respond with ONLY the following plain-text sections, in this
+exact order, each starting with its own marker line exactly as written (no
+markdown fences, no commentary outside these sections). This format exists
+specifically so free-form markdown in the body never needs escaping — write
+the body as normal markdown, quotes and newlines and all.
+
+<<<TITLE>>>
+short descriptive title, no date prefix, single line
+<<<CATEGORY>>>
+one of the category names above, exactly as written, single line
+<<<TAGS>>>
+comma-separated tags, single line, e.g.: portrait, meeting, ferpa
+<<<BODY>>>
+the full markdown body: attendees/format line, summary sections, then an
+"## Action Items" section with per-attendee subsections. This is the last
+section — everything after the BODY marker until the end of your response
+is the body, verbatim.
+
+## Transcript
+{transcript_text}

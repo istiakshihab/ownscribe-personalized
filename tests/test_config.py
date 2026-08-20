@@ -1,0 +1,217 @@
+"""Tests for configuration loading."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from unittest import mock
+
+from ownscribe.config import Config, OutputConfig, _merge_toml, ensure_config_file
+from ownscribe.transcription.mlx_transcriber import MLXWhisperTranscriber
+
+
+class TestDefaults:
+    def test_default_audio_backend(self):
+        cfg = Config()
+        assert cfg.audio.backend == "coreaudio"
+
+    def test_default_transcription_model(self):
+        cfg = Config()
+        assert cfg.transcription.model == "base"
+
+    def test_default_summarization_enabled(self):
+        cfg = Config()
+        assert cfg.summarization.enabled is True
+
+    def test_default_output_format(self):
+        cfg = Config()
+        assert cfg.output.format == "markdown"
+
+    def test_default_mic_settings(self):
+        cfg = Config()
+        assert cfg.audio.mic is True
+        assert cfg.audio.mic_device == ""
+
+    def test_default_capture_mode(self):
+        cfg = Config()
+        assert cfg.audio.capture_mode == "all"
+
+    def test_default_diarization_telemetry_off(self):
+        cfg = Config()
+        assert cfg.diarization.telemetry is False
+
+    def test_default_diarization_device_auto(self):
+        cfg = Config()
+        assert cfg.diarization.device == "auto"
+
+    def test_default_summarization_template_empty(self):
+        cfg = Config()
+        assert cfg.summarization.template == ""
+
+    def test_default_templates_empty(self):
+        cfg = Config()
+        assert cfg.templates == {}
+
+    def test_default_silence_timeout(self):
+        cfg = Config()
+        assert cfg.audio.silence_timeout == 300
+
+
+class TestMergeToml:
+    def test_full_override(self):
+        cfg = Config()
+        data = {
+            "audio": {"backend": "sounddevice", "device": "USB Mic"},
+            "transcription": {"model": "large-v3", "language": "de"},
+        }
+        merged = _merge_toml(cfg, data)
+        assert merged.audio.backend == "sounddevice"
+        assert merged.audio.device == "USB Mic"
+        assert merged.transcription.model == "large-v3"
+        assert merged.transcription.language == "de"
+
+    def test_partial_toml_keeps_defaults(self):
+        cfg = Config()
+        data = {"transcription": {"model": "small"}}
+        merged = _merge_toml(cfg, data)
+        assert merged.transcription.model == "small"
+        # Other sections unchanged
+        assert merged.audio.backend == "coreaudio"
+        assert merged.summarization.backend == "local"
+
+    def test_mic_settings_from_toml(self):
+        cfg = Config()
+        data = {"audio": {"mic": True, "mic_device": "MacBook Pro Microphone"}}
+        merged = _merge_toml(cfg, data)
+        assert merged.audio.mic is True
+        assert merged.audio.mic_device == "MacBook Pro Microphone"
+
+    def test_diarization_telemetry_from_toml(self):
+        cfg = Config()
+        data = {"diarization": {"telemetry": True}}
+        merged = _merge_toml(cfg, data)
+        assert merged.diarization.telemetry is True
+
+    def test_template_from_toml(self):
+        cfg = Config()
+        data = {"summarization": {"template": "lecture"}}
+        merged = _merge_toml(cfg, data)
+        assert merged.summarization.template == "lecture"
+
+    def test_user_templates_from_toml(self):
+        cfg = Config()
+        data = {
+            "templates": {
+                "my-notes": {
+                    "system_prompt": "You are a custom bot.",
+                    "prompt": "Custom: {transcript}",
+                }
+            }
+        }
+        merged = _merge_toml(cfg, data)
+        assert "my-notes" in merged.templates
+        assert merged.templates["my-notes"].system_prompt == "You are a custom bot."
+        assert merged.templates["my-notes"].prompt == "Custom: {transcript}"
+
+    def test_user_templates_partial(self):
+        cfg = Config()
+        data = {
+            "templates": {
+                "quick": {"prompt": "Summarize briefly: {transcript}"}
+            }
+        }
+        merged = _merge_toml(cfg, data)
+        assert merged.templates["quick"].system_prompt == ""
+        assert merged.templates["quick"].prompt == "Summarize briefly: {transcript}"
+
+    def test_unknown_keys_ignored(self):
+        cfg = Config()
+        data = {"audio": {"nonexistent_key": 42}}
+        merged = _merge_toml(cfg, data)
+        assert not hasattr(merged.audio, "nonexistent_key")
+
+
+class TestEnvOverrides:
+    def test_hf_token_from_env(self):
+        with (
+            mock.patch.dict(os.environ, {"HF_TOKEN": "hf_test123"}),
+            mock.patch("ownscribe.config.CONFIG_PATH") as mock_path,
+        ):
+            mock_path.exists.return_value = False
+            cfg = Config.load()
+        assert cfg.diarization.hf_token == "hf_test123"
+
+    def test_ollama_host_from_env(self):
+        with (
+            mock.patch.dict(os.environ, {"OLLAMA_HOST": "http://remote:11434"}),
+            mock.patch("ownscribe.config.CONFIG_PATH") as mock_path,
+        ):
+            mock_path.exists.return_value = False
+            cfg = Config.load()
+        assert cfg.summarization.host == "http://remote:11434"
+
+
+class TestEnsureConfigFile:
+    def test_creates_file_when_missing(self, tmp_path):
+        config_dir = tmp_path / "ownscribe"
+        config_path = config_dir / "config.toml"
+        with mock.patch("ownscribe.config.CONFIG_DIR", config_dir), \
+             mock.patch("ownscribe.config.CONFIG_PATH", config_path):
+            result = ensure_config_file()
+        assert result.exists()
+        assert "[audio]" in result.read_text()
+
+    def test_does_not_overwrite_existing(self, tmp_path):
+        config_dir = tmp_path / "ownscribe"
+        config_dir.mkdir()
+        config_path = config_dir / "config.toml"
+        config_path.write_text("# custom config\n")
+        with mock.patch("ownscribe.config.CONFIG_DIR", config_dir), \
+             mock.patch("ownscribe.config.CONFIG_PATH", config_path):
+            ensure_config_file()
+        assert config_path.read_text() == "# custom config\n"
+
+
+class TestResolveDiarizationDevice:
+    def test_cpu_passthrough(self):
+        assert MLXWhisperTranscriber._resolve_diarization_device("cpu") == "cpu"
+
+    def test_mps_passthrough(self):
+        assert MLXWhisperTranscriber._resolve_diarization_device("mps") == "mps"
+
+    def test_auto_with_mps_available(self):
+        with mock.patch("torch.backends.mps.is_available", return_value=True):
+            assert MLXWhisperTranscriber._resolve_diarization_device("auto") == "mps"
+
+    def test_auto_without_mps(self):
+        with mock.patch("torch.backends.mps.is_available", return_value=False):
+            assert MLXWhisperTranscriber._resolve_diarization_device("auto") == "cpu"
+
+
+class TestResolvedDir:
+    def test_expands_tilde(self):
+        cfg = OutputConfig(dir="~/ownscribe")
+        resolved = cfg.resolved_dir
+        assert "~" not in str(resolved)
+        assert str(resolved).endswith("ownscribe")
+
+    def test_absolute_path_unchanged(self):
+        cfg = OutputConfig(dir="/tmp/notes")
+        assert cfg.resolved_dir == Path("/tmp/notes")
+
+
+class TestResolvedAudioDir:
+    def test_expands_tilde(self):
+        cfg = OutputConfig(dir="/tmp/notes", audio_dir="~/audio-cache")
+        resolved = cfg.resolved_audio_dir
+        assert "~" not in str(resolved)
+        assert str(resolved).endswith("audio-cache")
+
+    def test_absolute_path_unchanged(self):
+        cfg = OutputConfig(dir="/tmp/notes", audio_dir="/tmp/audio-cache")
+        assert cfg.resolved_audio_dir == Path("/tmp/audio-cache")
+        assert cfg.resolved_audio_dir != cfg.resolved_dir
+
+    def test_falls_back_to_dir_when_empty(self):
+        cfg = OutputConfig(dir="/tmp/notes", audio_dir="")
+        assert cfg.resolved_audio_dir == cfg.resolved_dir
