@@ -239,7 +239,7 @@ def resume(
 
 @cli.command()
 def apps() -> None:
-    """List running apps with PIDs for use with --pid."""
+    """List running apps with PIDs."""
     from ownscribe.audio.coreaudio import CoreAudioRecorder
     recorder = CoreAudioRecorder()
     click.echo(recorder.list_apps())

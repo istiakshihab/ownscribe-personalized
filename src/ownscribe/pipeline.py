@@ -363,10 +363,6 @@ def run_warmup(config: Config) -> None:
                 raise SystemExit(1) from None
 
     click.echo(f"Whisper model ready: {config.transcription.model}")
-    if config.transcription.language:
-        click.echo(f"Alignment model ready: {config.transcription.language}")
-    else:
-        click.echo("Alignment model not preloaded (language auto-detect).")
 
     if diar_enabled:
         click.echo("Diarization pipeline ready.")
