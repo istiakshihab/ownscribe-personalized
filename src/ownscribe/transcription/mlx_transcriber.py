@@ -223,11 +223,24 @@ class MLXWhisperTranscriber(Transcriber):
                     hint = f"Vocabulary: {self._tx_config.hotwords}."
                     initial_prompt = f"{hint} {initial_prompt}" if initial_prompt else hint
 
-                # mlx_whisper prints its own tqdm progress to stderr; suppressed
-                # in favour of the begin/complete spinner rather than parsed,
-                # since tqdm's bar format isn't the whisperx "Progress: NN%"
-                # text the rest of this pipeline's progress writers expect.
-                with contextlib.redirect_stderr(devnull):
+                # mlx_whisper (with verbose=False) emits a real tqdm progress bar
+                # to stderr as it decodes ("NN%|...| done/total frames [...]").
+                # DownloadProgressWriter's percent-only fallback already parses
+                # this correctly (it doesn't require the byte-size units its
+                # main path looks for), so it's reused here rather than writing
+                # a second tqdm parser. Reset to 0 first: model loading above
+                # may have already driven this same bar to ~100% via its own
+                # download progress, and without an explicit reset the jump
+                # back down at the start of decoding reads as going backwards.
+                progress.update("transcribing", 0.0)
+
+                def _on_decode_progress(event: DownloadProgressEvent) -> None:
+                    fraction = download_event_fraction(event)
+                    if fraction is not None:
+                        progress.update("transcribing", fraction)
+
+                tx_writer = DownloadProgressWriter(_on_decode_progress)
+                with contextlib.redirect_stderr(tx_writer):
                     result = mlx_whisper.transcribe(
                         audio,
                         path_or_hf_repo=self._model_repo,
@@ -236,6 +249,7 @@ class MLXWhisperTranscriber(Transcriber):
                         word_timestamps=self._wants_word_timestamps(),
                         verbose=False,
                     )
+                tx_writer.flush()
 
                 language = result.get("language", "")
                 progress.complete("transcribing")

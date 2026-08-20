@@ -302,6 +302,40 @@ class TestTranscribeInner:
         assert word.text == "hello"
         assert word.score == 0.9
 
+    def test_decode_progress_parsed_from_tqdm_stderr(self):
+        """mlx_whisper writes its own tqdm bar to stderr during decoding
+        ("NN%|...| n/total frames [...]"); this must drive the same
+        progress bar the checklist renders, not get silently discarded."""
+        import sys
+
+        from ownscribe.config import TranscriptionConfig
+        from ownscribe.transcription.mlx_transcriber import MLXWhisperTranscriber
+
+        class _Audio:
+            shape = (16000,)
+
+        fake_whisperx = types.SimpleNamespace(load_audio=lambda _path: _Audio())
+
+        def fake_transcribe(*_args, **_kwargs):
+            # Mirrors mlx_whisper's real tqdm output format exactly (captured
+            # from a live run), including the carriage-return-delimited frames.
+            sys.stderr.write(" 0%|          | 0/913 [00:00<?, ?frames/s]\r")
+            sys.stderr.write("50%|#####     | 456/913 [00:01<00:01, 400.00frames/s]\r")
+            sys.stderr.write("100%|##########| 913/913 [00:02<00:00, 400.00frames/s]\n")
+            return {"segments": [], "language": "en"}
+
+        fake_mlx_whisper = types.SimpleNamespace(transcribe=fake_transcribe)
+
+        progress = _FakeProgress()
+        transcriber = MLXWhisperTranscriber(TranscriptionConfig(language="en"), None, progress=progress)
+        transcriber._model_loaded = True
+
+        with mock.patch.dict("sys.modules", {"whisperx": fake_whisperx, "mlx_whisper": fake_mlx_whisper}):
+            transcriber._transcribe_inner(mock.MagicMock())
+
+        fractions = [frac for key, frac in progress.updates if key == "transcribing"]
+        assert fractions == [0.0, 0.0, 0.5, 1.0]  # explicit reset, then the three parsed lines
+
 
 class TestDiarizationApiCompat:
     def test_load_diarization_pipeline_passes_token_kwarg(self):
