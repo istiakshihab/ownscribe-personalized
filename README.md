@@ -40,10 +40,12 @@ ownscribe **does not**, by default:
 All audio, transcripts, and summaries remain local. Transcription (MLX Whisper), diarization (pyannote), and local
 summarization (Phi-4-mini) all run on-device.
 
-**One opt-in exception:** [Obsidian vault filing](#obsidian-vault-filing) sends transcript *text* (never audio) to
-Claude via the `claude` CLI, to categorize and summarize it into a vault note. This is enabled by default in this
-fork's config — set `[obsidian] enabled = false` to keep everything fully local, or use a hosted
-[summarization backend](#configuration) instead if you want LLM summarization without vault filing.
+**Two opt-in exceptions:** [Obsidian vault filing](#obsidian-vault-filing) and [speaker naming](#speaker-diarization)
+both send transcript *text* (never audio) to Claude via the `claude` CLI — vault filing to categorize/summarize it
+into a note, speaker naming to describe each speaker's role so you can identify them. Both are enabled by default in
+this fork's config — set `[obsidian] enabled = false` and `[diarization] ask_speaker_names = false` to keep
+everything fully local, or use a hosted [summarization backend](#configuration) instead if you want LLM
+summarization without either.
 
 <p align="center">
   <img src="docs/demo-pipeline.gif" alt="ownscribe demo" width="750">
@@ -54,7 +56,7 @@ fork's config — set `[obsidian] enabled = false` to keep everything fully loca
 - **System audio capture** — records all system audio natively via Core Audio Taps (macOS 14.2+), no virtual audio drivers needed
 - **Microphone capture** — records system + mic audio simultaneously by default (press `m` to mute/unmute, or use `--no-mic`)
 - **MLX Whisper transcription** — GPU-accelerated speech-to-text on Apple Silicon, with word-level timestamps
-- **Speaker diarization** — optional speaker identification via pyannote (requires HuggingFace token; runs on MPS)
+- **Speaker diarization** — optional speaker identification via pyannote (requires HuggingFace token; runs on MPS), with an interactive prompt to name each speaker afterward
 - **Pipeline progress** — live checklist showing transcription, diarization sub-steps, and summarization progress
 - **Local LLM summarization** — structured meeting notes with a built-in model (Phi-4-mini); also supports Ollama, LM Studio, or any OpenAI-compatible server
 - **Summarization templates** — built-in presets for meetings, lectures, and quick briefs; define your own in config
@@ -70,8 +72,8 @@ fork's config — set `[obsidian] enabled = false` to keep everything fully loca
 - Python 3.12+
 - [ffmpeg](https://ffmpeg.org/) — `brew install ffmpeg`
 - Xcode Command Line Tools (`xcode-select --install`)
-- [Claude Code](https://github.com/anthropics/claude-code) CLI (`claude`), authenticated — only needed if
-  [Obsidian vault filing](#obsidian-vault-filing) is enabled (the default)
+- [Claude Code](https://github.com/anthropics/claude-code) CLI (`claude`), authenticated — needed for
+  [Obsidian vault filing](#obsidian-vault-filing) and [speaker naming](#speaker-diarization), both enabled by default
 
 Summarization works out of the box — a local model (Phi-4-mini, ~2.4 GB) downloads automatically on first run. Optionally, you can use [Ollama](https://ollama.ai), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible server instead (see [Configuration](#configuration)).
 
@@ -230,6 +232,7 @@ min_speakers = 0          # 0 = auto-detect
 max_speakers = 0
 telemetry = false         # allow HuggingFace Hub + pyannote metrics telemetry
 device = "auto"           # "auto" (mps if available), "mps", or "cpu"
+ask_speaker_names = true  # interactively name SPEAKER_00/01/... after diarization (skipped when not a TTY)
 
 [summarization]
 enabled = true
@@ -307,7 +310,27 @@ On Apple Silicon Macs, diarization automatically uses the Metal Performance Shad
 
 Diarization runs independently of transcription — it uses pyannote via PyTorch/MPS, unaffected by the MLX Whisper
 swap. When diarization ran, speaker turns are labeled `SPEAKER_00`, `SPEAKER_01`, etc. (anonymous IDs, not names)
-in `transcript.md`/`.json`, and get used for real attribution in [Obsidian vault filing](#obsidian-vault-filing).
+in `transcript.md`/`.json`, unless you name them interactively (see below).
+
+### Naming speakers
+
+After diarization, if `[diarization] ask_speaker_names = true` (the default) and you're at a TTY, ownscribe asks
+Claude for a one-sentence role blurb per speaker label — what they did/said in the meeting — then prompts you for a
+real name per speaker:
+
+```
+--- Speaker identification ---
+SPEAKER_00 — Opened the meeting and walked through the Q3 budget numbers.
+  Name (blank to keep label): Alice
+SPEAKER_01 — Pushed back on the timeline and volunteered to own the migration.
+  Name (blank to keep label): Bob
+```
+
+Blank input keeps that speaker's label as-is — you can name some speakers and skip others. Names apply to
+`transcript.md`/`.json` on disk *and* the vault note (Claude writes the summary using the real names directly,
+rather than a find-and-replace afterward). This is skipped automatically when not diarizing, not at a TTY (e.g. a
+scripted `ownscribe resume`), or `ask_speaker_names = false`. It does not affect ownscribe's own local-LLM
+`summary.md`, which still uses `SPEAKER_XX` labels if summarization is enabled.
 
 ## Obsidian Vault Filing
 

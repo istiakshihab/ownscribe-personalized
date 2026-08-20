@@ -1191,3 +1191,112 @@ class TestVaultFilingConfirmation:
         mock_confirm, written = self._run(tmp_path, isatty=True, confirm_before_filing=False)
         mock_confirm.assert_not_called()
         assert len(written) == 1
+
+
+class TestSpeakerNamingIntegration:
+    """Interactive speaker naming wired into _do_transcribe_and_summarize."""
+
+    def _diarized_transcript(self) -> TranscriptResult:
+        return TranscriptResult(
+            segments=[
+                Segment(text="Let's start.", start=0.0, end=1.0, speaker="SPEAKER_00"),
+                Segment(text="Sounds good.", start=1.0, end=2.0, speaker="SPEAKER_01"),
+            ],
+            language="en",
+            duration=2.0,
+        )
+
+    def _run(self, tmp_path, *, isatty: bool, ask_speaker_names: bool, names: dict | None = None):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = False
+        config.obsidian.enabled = False
+        config.diarization.enabled = True
+        config.diarization.hf_token = "fake-token"
+        config.diarization.ask_speaker_names = ask_speaker_names
+
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._diarized_transcript()
+
+        roles = {"SPEAKER_00": "Led the meeting.", "SPEAKER_01": "Took notes."}
+        names = names if names is not None else {}
+
+        def fake_apply(result, mapping):
+            for seg in result.segments:
+                if seg.speaker in mapping:
+                    seg.speaker = mapping[seg.speaker]
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.speaker_naming.get_speaker_roles", return_value=roles) as mock_roles,
+            mock.patch("sys.stdin.isatty", return_value=isatty),
+            mock.patch("ownscribe.speaker_naming.prompt_for_names", return_value=names) as mock_prompt,
+            mock.patch("ownscribe.speaker_naming.apply_speaker_names", side_effect=fake_apply) as mock_apply,
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
+
+        transcript_text = (out_dir / "transcript.md").read_text()
+        return mock_roles, mock_prompt, mock_apply, transcript_text
+
+    def test_asks_and_renames_when_interactive(self, tmp_path):
+        mock_roles, mock_prompt, mock_apply, transcript_text = self._run(
+            tmp_path, isatty=True, ask_speaker_names=True, names={"SPEAKER_00": "Alice"}
+        )
+        mock_roles.assert_called_once()
+        mock_prompt.assert_called_once()
+        mock_apply.assert_called_once()
+        assert "Alice" in transcript_text
+        assert "SPEAKER_01" in transcript_text  # left unnamed
+
+    def test_role_lookup_runs_but_prompt_skipped_when_not_tty(self, tmp_path):
+        mock_roles, mock_prompt, mock_apply, transcript_text = self._run(
+            tmp_path, isatty=False, ask_speaker_names=True
+        )
+        mock_roles.assert_called_once()
+        mock_prompt.assert_not_called()
+        mock_apply.assert_not_called()
+        assert "SPEAKER_00" in transcript_text
+
+    def test_disabled_in_config_skips_everything(self, tmp_path):
+        mock_roles, mock_prompt, mock_apply, transcript_text = self._run(
+            tmp_path, isatty=True, ask_speaker_names=False
+        )
+        mock_roles.assert_not_called()
+        mock_prompt.assert_not_called()
+        mock_apply.assert_not_called()
+        assert "SPEAKER_00" in transcript_text
+
+    def test_role_lookup_failure_is_non_fatal(self, tmp_path, capsys):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = False
+        config.obsidian.enabled = False
+        config.diarization.enabled = True
+        config.diarization.hf_token = "fake-token"
+        config.diarization.ask_speaker_names = True
+
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._diarized_transcript()
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.speaker_naming.get_speaker_roles", side_effect=RuntimeError("network down")),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
+
+        assert (out_dir / "transcript.md").exists()
+        assert "network down" in capsys.readouterr().err

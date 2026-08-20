@@ -33,6 +33,7 @@ min_speakers = 0          # 0 = auto-detect
 max_speakers = 0
 telemetry = false         # set to true to allow HuggingFace Hub + pyannote metrics telemetry
 device = "auto"           # "auto" (mps if available), "mps", or "cpu"
+ask_speaker_names = true  # interactively name SPEAKER_00/01/... after diarization (skipped when not a TTY)
 
 [summarization]
 enabled = true
@@ -90,6 +91,7 @@ class DiarizationConfig:
     max_speakers: int = 0
     telemetry: bool = False
     device: str = "auto"
+    ask_speaker_names: bool = True  # interactively name SPEAKER_00/01/... after diarization (skipped when not a TTY)
 
 
 @dataclass

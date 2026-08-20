@@ -10,15 +10,12 @@ ever constructing a path.
 
 from __future__ import annotations
 
-import contextlib
-import json
 import re
-import shutil
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ownscribe.claude_cli import ClaudeCliError, resolve_claude_bin, run_claude
 from ownscribe.config import CONFIG_DIR, Config
 from ownscribe.transcription.models import TranscriptResult
 
@@ -65,73 +62,59 @@ def _ensure_prompt_template() -> Path:
     return PROMPT_TEMPLATE_PATH
 
 
-def _diarization_note(has_speakers: bool) -> str:
-    if has_speakers:
+def _diarization_note(has_speakers: bool, speakers_named: bool = False) -> str:
+    if not has_speakers:
         return (
-            "This transcript includes speaker diarization: turns are labeled with "
-            "speaker tags like SPEAKER_00, SPEAKER_01. These are consistent per-speaker "
-            "within this transcript, but are anonymous IDs, not names — map a tag to a "
-            "real name only where that person is explicitly named or self-identifies in "
-            "the text."
+            "This transcript has no speaker diarization — it is a single undifferentiated "
+            "stream of text with no speaker boundaries. Only attribute a statement to a "
+            "specific person if they are named or self-identify in the text; otherwise "
+            "write the summary neutrally without inventing who said what."
+        )
+    if speakers_named:
+        return (
+            "This transcript includes speaker diarization, and the speaker labels have "
+            "already been replaced with real names (assigned by the user, not guessed). "
+            "Attribute statements to these named speakers normally, as in any transcript "
+            "with known participants."
         )
     return (
-        "This transcript has no speaker diarization — it is a single undifferentiated "
-        "stream of text with no speaker boundaries. Only attribute a statement to a "
-        "specific person if they are named or self-identify in the text; otherwise "
-        "write the summary neutrally without inventing who said what."
+        "This transcript includes speaker diarization: turns are labeled with "
+        "speaker tags like SPEAKER_00, SPEAKER_01. These are consistent per-speaker "
+        "within this transcript, but are anonymous IDs, not names — map a tag to a "
+        "real name only where that person is explicitly named or self-identifies in "
+        "the text."
     )
 
 
 def _resolve_claude_bin(configured: str) -> str:
-    if configured:
-        return configured
-    found = shutil.which("claude")
-    if not found:
-        raise VaultFilingError(
-            "claude CLI not found on PATH. Set obsidian.claude_bin in config.toml, "
-            "or install it so `claude` resolves on PATH."
-        )
-    return found
+    try:
+        return resolve_claude_bin(configured)
+    except ClaudeCliError as exc:
+        raise VaultFilingError(str(exc)) from exc
 
 
-def build_prompt(folder_name: str, meeting_name: str, transcript_text: str, has_speakers: bool) -> str:
+def build_prompt(
+    folder_name: str,
+    meeting_name: str,
+    transcript_text: str,
+    has_speakers: bool,
+    speakers_named: bool = False,
+) -> str:
     template_path = _ensure_prompt_template()
     template = template_path.read_text(encoding="utf-8")
     return template.format(
         folder_name=folder_name,
         meeting_name=meeting_name,
-        diarization_note=_diarization_note(has_speakers),
+        diarization_note=_diarization_note(has_speakers, speakers_named),
         transcript_text=transcript_text,
     )
 
 
 def call_claude(prompt: str, claude_bin: str) -> dict:
-    result = subprocess.run(
-        [claude_bin, "-p", prompt, "--output-format", "json", "--allowedTools", "", "--model", "sonnet"],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        # Isolated cwd (no CLAUDE.md/.claude project config here) so this
-        # narrow text-only call doesn't auto-discover unrelated project
-        # instructions/agents/skills as extra context.
-        cwd=str(CONFIG_DIR),
-    )
-    envelope = None
-    # strict=False: tolerates raw control characters (e.g. literal newlines)
-    # inside JSON string values, which models sometimes emit instead of
-    # properly escaped \n.
-    with contextlib.suppress(json.JSONDecodeError, ValueError):
-        envelope = json.loads(result.stdout, strict=False)
-
-    if result.returncode != 0 or (envelope and envelope.get("is_error")):
-        detail = envelope.get("result") if envelope else None
-        raise VaultFilingError(
-            f"claude exited {result.returncode}: "
-            f"{detail or result.stderr[:2000] or result.stdout[:2000]}"
-        )
-    if envelope is None:
-        raise VaultFilingError(f"claude returned non-JSON stdout: {result.stdout[:2000]}")
-    text = envelope.get("result", "")
+    try:
+        text = run_claude(prompt, claude_bin, cwd=CONFIG_DIR)
+    except ClaudeCliError as exc:
+        raise VaultFilingError(str(exc)) from exc
     return parse_delimited_response(text)
 
 
@@ -219,11 +202,17 @@ def write_note(parsed: dict, folder_name: str, date: str, vault_dir: Path) -> Fi
     return FiledNote(path=dest_path, needs_review=needs_review)
 
 
-def prepare_note(config: Config, result: TranscriptResult, out_dir: Path) -> PreparedNote:
+def prepare_note(
+    config: Config, result: TranscriptResult, out_dir: Path, *, speakers_named: bool = False
+) -> PreparedNote:
     """Summarize/categorize a just-finished transcript, but don't write it yet —
     callers that want a confirm-before-write step can inspect `.parsed` first,
     then pass this to write_note(). Raises VaultFilingError on any failure;
-    callers should treat that as non-fatal to the transcript already in hand."""
+    callers should treat that as non-fatal to the transcript already in hand.
+
+    `speakers_named` should be True when the caller already replaced SPEAKER_XX
+    labels in `result` with real names (see speaker_naming.py) — it only changes
+    the diarization guidance given to the model, not the transcript text itself."""
     folder_name = out_dir.name
     date = folder_name[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", folder_name) else datetime.now().strftime("%Y-%m-%d")
 
@@ -232,7 +221,7 @@ def prepare_note(config: Config, result: TranscriptResult, out_dir: Path) -> Pre
         raise VaultFilingError("transcript is empty, nothing to file")
 
     claude_bin = _resolve_claude_bin(config.obsidian.claude_bin)
-    prompt = build_prompt(folder_name, folder_name, transcript_text, result.has_speakers)
+    prompt = build_prompt(folder_name, folder_name, transcript_text, result.has_speakers, speakers_named)
     parsed = call_claude(prompt, claude_bin)
     return PreparedNote(parsed=parsed, folder_name=folder_name, date=date)
 

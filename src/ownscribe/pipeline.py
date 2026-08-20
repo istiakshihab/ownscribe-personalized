@@ -505,16 +505,18 @@ def _do_transcribe_and_summarize(
     vault_note = None
     vault_error = None
     vault_prepared = None
-    vault_prepare_error = None
+    speaker_roles: dict[str, str] = {}
+    speaker_roles_error = None
 
     local_sum = sum_enabled and config.summarization.backend == "local"
     vault_filing_enabled = config.obsidian.enabled
+    identify_speakers = diar_enabled and config.diarization.ask_speaker_names
 
     with PipelineProgress(
         diarize=diar_enabled,
         summarize=sum_enabled,
         download_summarizer=local_sum,
-        file_to_vault=vault_filing_enabled,
+        identify_speakers=identify_speakers,
     ) as progress:
         try:
             transcriber = _create_transcriber(config, progress=progress)
@@ -526,25 +528,21 @@ def _do_transcribe_and_summarize(
             raise SystemExit(1) from None
 
         result = transcriber.transcribe(audio_path)
-
-        # Save transcript — silent, no echo
-        transcript_str, _ = _format_output(config, result)
         ext = "json" if config.output.format == "json" else "md"
         transcript_path = out_dir / f"transcript.{ext}"
-        transcript_path.write_text(transcript_str)
 
-        if vault_filing_enabled:
-            progress.begin("filing_to_vault")
+        if identify_speakers and result.has_speakers:
+            progress.begin("identifying_speakers")
             try:
-                from ownscribe.vault_filing import prepare_note
+                from ownscribe.speaker_naming import get_speaker_roles
 
-                vault_prepared = prepare_note(config, result, out_dir)
-                progress.complete("filing_to_vault")
+                speaker_roles = get_speaker_roles(config, result)
+                progress.complete("identifying_speakers")
             except Exception as exc:
-                # Never let a vault-filing failure (network, auth, bad response)
-                # take down a run that already has a good transcript in hand.
-                progress.fail("filing_to_vault")
-                vault_prepare_error = str(exc)
+                # Never let this block the transcript — worst case we just keep
+                # the anonymous SPEAKER_XX labels.
+                progress.fail("identifying_speakers")
+                speaker_roles_error = str(exc)
 
         if sum_enabled:
             try:
@@ -578,8 +576,32 @@ def _do_transcribe_and_summarize(
             finally:
                 summarizer.close()
 
-    # --- All user-facing output after TUI exits ---
+    # --- All user-facing output (and any interactive prompts) after TUI exits ---
+    name_mapping: dict[str, str] = {}
+    if identify_speakers and result.has_speakers:
+        if speaker_roles_error is not None:
+            click.echo(f"Warning: could not identify speakers: {speaker_roles_error}", err=True)
+        elif sys.stdin.isatty():
+            from ownscribe.speaker_naming import apply_speaker_names, prompt_for_names
+
+            name_mapping = prompt_for_names(result, speaker_roles)
+            apply_speaker_names(result, name_mapping)
+
+    # Written here (not inside the TUI) so it reflects any names just assigned above.
+    transcript_str, _ = _format_output(config, result)
+    transcript_path.write_text(transcript_str)
     click.echo(f"Transcript saved to {transcript_path}")
+
+    if vault_filing_enabled:
+        try:
+            from ownscribe.vault_filing import prepare_note
+
+            click.echo("Filing to vault...")
+            vault_prepared = prepare_note(config, result, out_dir, speakers_named=bool(name_mapping))
+        except Exception as exc:
+            # Never let a vault-filing failure (network, auth, bad response)
+            # take down a run that already has a good transcript in hand.
+            vault_error = str(exc)
 
     if vault_prepared is not None:
         from ownscribe.vault_filing import VaultFilingError, write_note
@@ -603,8 +625,6 @@ def _do_transcribe_and_summarize(
                 vault_error = str(exc)
         else:
             click.echo("Skipped filing to vault.")
-    elif vault_prepare_error is not None:
-        vault_error = vault_prepare_error
 
     if vault_note is not None:
         click.echo(

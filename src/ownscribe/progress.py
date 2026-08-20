@@ -286,7 +286,7 @@ class PipelineProgress:
         transcribe: bool = True,
         include_prepare: bool = False,
         download_summarizer: bool = False,
-        file_to_vault: bool = False,
+        identify_speakers: bool = False,
     ) -> None:
         steps: list[_Step] = []
         if include_prepare:
@@ -301,14 +301,14 @@ class PipelineProgress:
                 _Step("embeddings", "Embeddings", indent=1),
                 _Step("clustering", "Clustering", indent=1),
             ])
+        if identify_speakers:
+            steps.append(_Step("identifying_speakers", "Identifying speakers", indent=0))
         if summarize:
             steps.append(_Step("summarizing", "Summarizing", indent=0))
             if download_summarizer:
                 steps.append(_Step("downloading_model", "Downloading model", indent=1))
         elif download_summarizer:
             steps.append(_Step("downloading_model", "Downloading summarization model", indent=0))
-        if file_to_vault:
-            steps.append(_Step("filing_to_vault", "Filing to vault", indent=0))
         self._steps = steps
         self._step_map: dict[str, _Step] = {s.key: s for s in steps}
         self._active: set[str] = set()

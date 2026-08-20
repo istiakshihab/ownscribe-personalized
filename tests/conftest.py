@@ -81,23 +81,27 @@ def synthetic_wav() -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _block_real_vault_filing(monkeypatch):
-    """Safety net: `Config()` defaults to obsidian.enabled = True, so any test
-    that exercises _do_transcribe_and_summarize/run_pipeline/etc. without
-    explicitly mocking vault_filing would otherwise invoke the real `claude`
-    CLI and write a real note into the user's actual Obsidian vault. Block the
-    subprocess call unconditionally; tests that want to exercise this path
-    deliberately mock ownscribe.vault_filing.call_claude (or higher) themselves,
-    which replaces this function before it's ever reached."""
+def _block_real_claude_cli(monkeypatch):
+    """Safety net: `Config()` defaults to obsidian.enabled = True and
+    diarization.ask_speaker_names = True, so any test that exercises
+    _do_transcribe_and_summarize/run_pipeline/etc. without explicitly mocking
+    vault_filing/speaker_naming would otherwise invoke the real `claude` CLI
+    and write a real note into the user's actual Obsidian vault (this has
+    already happened once — see git history). Block the subprocess call
+    unconditionally at its one shared choke point (claude_cli.run_claude);
+    tests that want to exercise this path deliberately mock
+    ownscribe.vault_filing.call_claude / ownscribe.speaker_naming.get_speaker_roles
+    (or higher) themselves, which replaces the call before it's ever reached."""
 
     def _blocked(*_args, **_kwargs):
         raise RuntimeError(
             "Blocked a real `claude` subprocess call from a test. If this test "
-            "intends to exercise vault filing, mock ownscribe.vault_filing.call_claude "
-            "(or prepare_note/file_to_vault) explicitly instead of relying on the real CLI."
+            "intends to exercise vault filing or speaker naming, mock "
+            "ownscribe.vault_filing.call_claude / ownscribe.speaker_naming.get_speaker_roles "
+            "(or higher) explicitly instead of relying on the real CLI."
         )
 
-    monkeypatch.setattr("ownscribe.vault_filing.subprocess.run", _blocked)
+    monkeypatch.setattr("ownscribe.claude_cli.subprocess.run", _blocked)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

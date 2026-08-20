@@ -48,6 +48,19 @@ class TestDiarizationNote:
         note = _diarization_note(True)
         assert "SPEAKER_00" in note
 
+    def test_notes_speakers_already_named(self):
+        from ownscribe.vault_filing import _diarization_note
+
+        note = _diarization_note(True, speakers_named=True)
+        assert "SPEAKER_00" not in note
+        assert "real names" in note
+
+    def test_speakers_named_ignored_without_diarization(self):
+        from ownscribe.vault_filing import _diarization_note
+
+        # speakers_named is meaningless without has_speakers=True
+        assert _diarization_note(False, speakers_named=True) == _diarization_note(False)
+
     def test_notes_diarization_absent(self):
         from ownscribe.vault_filing import _diarization_note
 
