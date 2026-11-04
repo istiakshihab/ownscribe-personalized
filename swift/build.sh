@@ -13,6 +13,7 @@ swiftc \
     -framework ScreenCaptureKit \
     -framework CoreMedia \
     -framework AVFAudio \
+    -framework AVFoundation \
     -framework AppKit \
     -framework CoreGraphics \
     -framework CoreAudio \

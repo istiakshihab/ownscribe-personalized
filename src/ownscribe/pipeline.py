@@ -24,13 +24,49 @@ from ownscribe.progress import (
 )
 from ownscribe.summarization import create_summarizer
 
-# A standard WAV file header (RIFF + fmt + data chunk header) is 44 bytes.
-# Files at or below this size contain no audio frames.
-_WAV_HEADER_SIZE = 44
+
+def _wav_data_bytes(path: Path) -> int:
+    """Bytes of audio written so far to a WAV file that may still be open for writing.
+
+    Measured from where the data chunk starts instead of assuming a 44-byte header:
+    AVAudioFile pads its header to 4096 bytes, and the declared chunk size stays 0 until
+    the writer closes the file. Returns 0 for a missing or non-WAV file.
+    """
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            header = f.read(12)
+            if len(header) < 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+                return 0
+            while True:
+                chunk = f.read(8)
+                if len(chunk) < 8:
+                    return 0
+                chunk_size = int.from_bytes(chunk[4:], "little")
+                if chunk[:4] == b"data":
+                    return max(0, size - f.tell())
+                f.seek(chunk_size + (chunk_size & 1), 1)
+    except OSError:
+        return 0
+
+
+def _audio_frames(path: Path) -> int:
+    """Number of audio frames in a finished recording; 0 if it is missing or unreadable."""
+    try:
+        import soundfile as sf
+
+        return sf.info(str(path)).frames
+    except Exception:
+        return 0
+
+
+def _helper_temp_files(audio_path: Path) -> list[Path]:
+    """Per-track files the Core Audio helper writes before merging them into audio_path."""
+    return [audio_path.with_name(f"{audio_path.name}.{track}.tmp.wav") for track in ("mic", "sys")]
 
 
 def _check_audio_silence(audio_path: Path) -> None:
-    """Check if the recorded audio is silent and warn the user."""
+    """Exit with an explanation if the whole recording is digital silence."""
     try:
         import numpy as np
         import soundfile as sf
@@ -38,23 +74,28 @@ def _check_audio_silence(audio_path: Path) -> None:
         return  # Skip check if deps not available
 
     try:
-        # Read up to 5 seconds
-        info = sf.info(audio_path)
-        frames_to_read = min(int(info.samplerate * 5), info.frames)
-        data, _ = sf.read(audio_path, frames=frames_to_read, dtype="float32")
-        peak = float(np.max(np.abs(data)))
+        # Scan the whole file, stopping at the first audible block. Only the first 5 s used
+        # to be read, so a recording that merely started quietly was rejected as silent and
+        # the run quit without a transcript.
+        with sf.SoundFile(str(audio_path)) as f:
+            if f.frames == 0:
+                return
+            block = max(1, f.samplerate * 10)
+            while len(data := f.read(block, dtype="float32")):
+                if float(np.max(np.abs(data))) >= 1e-6:
+                    return
     except Exception:
         return  # Don't block pipeline on check failure
 
-    if peak < 1e-6:
-        click.echo(
-            "\nError: Recorded audio is completely silent (peak amplitude ~0).\n"
-            "This usually means Screen Recording permission is missing.\n"
-            "Fix: System Settings > Privacy & Security > Screen Recording "
-            "— enable your terminal app, then restart it.\n",
-            err=True,
-        )
-        raise SystemExit(1)
+    click.echo(
+        "\nError: The recording is completely silent from start to end (peak amplitude ~0).\n"
+        "This usually means a permission is missing for your terminal app in\n"
+        "System Settings > Privacy & Security: Screen Recording (system audio) or\n"
+        "Microphone (mic audio). Enable it, then restart the terminal.\n"
+        f"The recording was kept at {audio_path}\n",
+        err=True,
+    )
+    raise SystemExit(1)
 
 
 def _get_output_dir(config: Config) -> Path:
@@ -118,6 +159,7 @@ def _create_recorder(config: Config):
             mic_device=config.audio.mic_device,
             capture_mode=config.audio.capture_mode,
             silence_timeout=config.audio.silence_timeout,
+            avoid_bluetooth_mic=config.audio.mic_avoid_bluetooth,
         )
         if recorder.is_available():
             return recorder
@@ -254,9 +296,19 @@ def run_pipeline(config: Config) -> None:
         old_termios = termios.tcgetattr(sys.stdin)
         tty.setcbreak(sys.stdin.fileno())
 
+    def on_interrupt_while_saving(sig, frame):
+        # A second Ctrl+C here used to kill the run while the helper was still merging.
+        click.echo("\n  Still saving the recording, please wait...", err=True)
+
+    # With the mic on, the helper records each track to a temp file and merges them on stop.
+    written_files = [audio_path, *_helper_temp_files(audio_path)]
     warned_no_data = False
     try:
         while not stop_event and recorder.is_recording:
+            # Helper status and warnings (which mic, a silent mic, ...) as they happen,
+            # not after the meeting is over.
+            for message in recorder.pop_messages():
+                click.echo(f"\r\033[K  {message}", err=message.startswith("Warning"))
             elapsed = time.time() - start_time
             mins, secs = divmod(int(elapsed), 60)
             mute_indicator = "  [MIC MUTED]" if recorder.is_muted else ""
@@ -266,9 +318,9 @@ def run_pipeline(config: Config) -> None:
             )
             if (
                 not warned_no_data
-                and elapsed >= 3
-                and audio_path.exists()
-                and audio_path.stat().st_size <= _WAV_HEADER_SIZE
+                and elapsed >= 5
+                and any(path.exists() for path in written_files)
+                and not any(_wav_data_bytes(path) for path in written_files)
             ):
                 click.echo(
                     "\n\n  Warning: No audio data received yet.\n",
@@ -288,15 +340,24 @@ def run_pipeline(config: Config) -> None:
     finally:
         if old_termios is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_termios)
-        signal.signal(signal.SIGINT, original_handler)
+        # Say so before waiting: the helper finalizes and merges the tracks first, and the
+        # silent pause used to invite a second Ctrl+C. Stop even if the loop raised, so the
+        # helper is never left recording on its own.
+        if stop_event:
+            click.echo("\n\nStopping recording, saving audio...")
+        signal.signal(signal.SIGINT, on_interrupt_while_saving)
+        try:
+            recorder.stop()
+        finally:
+            signal.signal(signal.SIGINT, original_handler)
 
-    recorder.stop()
-    if getattr(recorder, "silence_timed_out", False):
-        click.echo("\n\nRecording auto-stopped after silence timeout.")
-    else:
-        click.echo("\n\nStopping recording...")
+    if not stop_event:
+        if getattr(recorder, "silence_timed_out", False):
+            click.echo("\n\nRecording auto-stopped after silence timeout.")
+        else:
+            click.echo("\n\nRecording stopped.")
 
-    if not audio_path.exists() or audio_path.stat().st_size <= _WAV_HEADER_SIZE:
+    if _audio_frames(audio_path) == 0:
         message = (
             "Error: No audio was captured. Make sure audio is playing on your system, "
             "or use --device to capture mic-only."
@@ -305,6 +366,11 @@ def run_pipeline(config: Config) -> None:
         # when it cannot open the microphone (no input device, permission denied).
         if config.audio.mic:
             message += "\nIf the microphone is unavailable, use --no-mic to record system audio only."
+        leftovers = [path for path in _helper_temp_files(audio_path) if path.exists()]
+        if leftovers:
+            message += "\nThe recorder left raw tracks that may still hold audio:\n" + "\n".join(
+                f"  {path}" for path in leftovers
+            )
         click.echo(message, err=True)
         raise SystemExit(1)
 

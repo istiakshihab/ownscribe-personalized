@@ -54,7 +54,7 @@ summarization without either.
 ## Features
 
 - **System audio capture** — records all system audio natively via Core Audio Taps (macOS 14.2+), no virtual audio drivers needed
-- **Microphone capture** — records system + mic audio simultaneously by default (press `m` to mute/unmute, or use `--no-mic`)
+- **Microphone capture** — records system + mic audio simultaneously by default (press `m` to mute/unmute, or use `--no-mic`). The mic in use is shown when recording starts, a mic that delivers only silence is flagged live, and a Bluetooth headset that macOS made the default input is skipped in favour of the built-in mic (`mic_avoid_bluetooth`)
 - **MLX Whisper transcription** — GPU-accelerated speech-to-text on Apple Silicon, with word-level timestamps
 - **Speaker diarization** — optional speaker identification via pyannote (requires HuggingFace token; runs on MPS), with an interactive prompt to name each speaker afterward
 - **Pipeline progress** — live checklist showing transcription, diarization sub-steps, and summarization progress
@@ -215,6 +215,7 @@ backend = "coreaudio"     # "coreaudio" or "sounddevice"
 device = ""               # empty = system audio
 mic = true                # also capture microphone input
 mic_device = ""           # specific mic device name (empty = default)
+mic_avoid_bluetooth = true  # with no mic_device: record the built-in mic when the default input is a Bluetooth headset
 capture_mode = "all"      # "all" = capture all system audio directly; "picker" = show source picker
 silence_timeout = 300     # seconds of silence before auto-stop; 0 = disabled
 

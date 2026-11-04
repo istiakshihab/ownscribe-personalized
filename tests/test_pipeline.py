@@ -11,6 +11,14 @@ from ownscribe.config import Config
 from ownscribe.transcription.models import Segment, TranscriptResult
 
 
+def _write_wav(path, samples, samplerate=16000):
+    """Write float samples as a mono float32 WAV (soundfile is a runtime dependency)."""
+    import numpy as np
+    import soundfile as sf
+
+    sf.write(str(path), np.asarray(samples, dtype="float32"), samplerate, subtype="FLOAT")
+
+
 class TestCreateRecorder:
     def test_coreaudio_when_available(self):
         from ownscribe.pipeline import _create_recorder
@@ -61,7 +69,9 @@ class TestCreateRecorder:
         with mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_cls:
             mock_cls.return_value.is_available.return_value = True
             _create_recorder(config)
-            mock_cls.assert_called_once_with(mic=True, mic_device="", capture_mode="all", silence_timeout=120)
+            mock_cls.assert_called_once_with(
+                mic=True, mic_device="", capture_mode="all", silence_timeout=120, avoid_bluetooth_mic=True
+            )
 
     def test_capture_mode_passed_to_coreaudio(self):
         from ownscribe.pipeline import _create_recorder
@@ -74,7 +84,9 @@ class TestCreateRecorder:
         with mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_cls:
             mock_cls.return_value.is_available.return_value = True
             _create_recorder(config)
-            mock_cls.assert_called_once_with(mic=True, mic_device="", capture_mode="picker", silence_timeout=300)
+            mock_cls.assert_called_once_with(
+                mic=True, mic_device="", capture_mode="picker", silence_timeout=300, avoid_bluetooth_mic=True
+            )
 
     def test_silence_timeout_passed_to_sounddevice(self):
         from ownscribe.pipeline import _create_recorder
@@ -750,8 +762,8 @@ class TestRunPipelineAudioLocation:
         recorder.silence_warning = False
 
         def _start(path):
-            # Must exceed _WAV_HEADER_SIZE (44 bytes) or run_pipeline treats it as empty.
-            path.write_bytes(b"fake audio data, definitely more than 44 bytes")
+            # run_pipeline counts audio frames, so this must be a real, non-silent WAV.
+            _write_wav(path, [0.25, -0.25] * 800)
 
         recorder.start.side_effect = _start
         return recorder
@@ -1300,3 +1312,165 @@ class TestSpeakerNamingIntegration:
 
         assert (out_dir / "transcript.md").exists()
         assert "network down" in capsys.readouterr().err
+
+
+def _avaudiofile_style_header() -> bytes:
+    """An empty WAV as AVAudioFile writes it: JUNK + fmt + FLLR padding to 4096 bytes."""
+    import struct
+
+    fmt = struct.pack("<HHIIHH", 3, 1, 24000, 24000 * 4, 4, 32)
+    body = b"WAVE" + b"JUNK" + struct.pack("<I", 28) + bytes(28) + b"fmt " + struct.pack("<I", 16) + fmt
+    filler = 4096 - (8 + len(body) + 8 + 8)
+    body += b"FLLR" + struct.pack("<I", filler) + bytes(filler) + b"data" + struct.pack("<I", 0)
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+class TestAudioPresenceChecks:
+    """The helper's empty WAVs are 4096 bytes, not 44; nothing may treat them as audio."""
+
+    def test_empty_helper_wav_has_no_data(self, tmp_path):
+        from ownscribe.pipeline import _audio_frames, _wav_data_bytes
+
+        path = tmp_path / "empty.wav"
+        path.write_bytes(_avaudiofile_style_header())
+
+        assert path.stat().st_size == 4096
+        assert _wav_data_bytes(path) == 0
+        assert _audio_frames(path) == 0
+
+    def test_data_still_being_written_is_seen(self, tmp_path):
+        from ownscribe.pipeline import _wav_data_bytes
+
+        path = tmp_path / "recording.wav"
+        # While recording, the declared data size is still 0; only the file grows.
+        path.write_bytes(_avaudiofile_style_header() + bytes(9600))
+
+        assert _wav_data_bytes(path) == 9600
+
+    def test_missing_or_garbage_file(self, tmp_path):
+        from ownscribe.pipeline import _audio_frames, _wav_data_bytes
+
+        garbage = tmp_path / "garbage.wav"
+        garbage.write_bytes(b"not a wav file at all, but longer than 44 bytes ......")
+
+        assert _wav_data_bytes(tmp_path / "missing.wav") == 0
+        assert _wav_data_bytes(garbage) == 0
+        assert _audio_frames(garbage) == 0
+
+    def test_finished_wav_frames(self, tmp_path):
+        from ownscribe.pipeline import _audio_frames
+
+        path = tmp_path / "recording.wav"
+        _write_wav(path, [0.1] * 1600)
+
+        assert _audio_frames(path) == 1600
+
+
+class TestCheckAudioSilence:
+    def test_quiet_start_is_not_rejected(self, tmp_path):
+        """Only the first 5 s used to be checked, so a quiet opening killed the run."""
+        from ownscribe.pipeline import _check_audio_silence
+
+        path = tmp_path / "recording.wav"
+        _write_wav(path, [0.0] * (16000 * 12) + [0.2, -0.2] * 8000)
+
+        _check_audio_silence(path)  # must not raise
+
+    def test_fully_silent_recording_exits_and_names_both_permissions(self, tmp_path, capsys):
+        import pytest
+
+        from ownscribe.pipeline import _check_audio_silence
+
+        path = tmp_path / "recording.wav"
+        _write_wav(path, [0.0] * 16000 * 3)
+
+        with pytest.raises(SystemExit):
+            _check_audio_silence(path)
+        err = capsys.readouterr().err
+
+        assert "Screen Recording" in err
+        assert "Microphone" in err
+        assert str(path) in err
+
+
+class TestRunPipelineStopping:
+    def _recorder(self):
+        recorder = mock.MagicMock()
+        recorder.is_muted = False
+        recorder.silence_timed_out = False
+        recorder.silence_warning = False
+        return recorder
+
+    def _run(self, tmp_path, recorder):
+        from ownscribe.pipeline import run_pipeline
+
+        config = Config()
+        config.output.dir = str(tmp_path / "notes")
+        with (
+            mock.patch("ownscribe.pipeline._create_recorder", return_value=recorder),
+            mock.patch("ownscribe.pipeline._do_transcribe_and_summarize") as mock_ts,
+            mock.patch("ownscribe.pipeline.time.sleep"),
+        ):
+            run_pipeline(config)
+        return mock_ts
+
+    def test_ctrl_c_announces_saving_first_and_survives_a_second_ctrl_c(self, tmp_path, capsys):
+        import os
+        import signal
+
+        recorder = self._recorder()
+        recorder.is_recording = True
+        recorder.start.side_effect = lambda path: _write_wav(path, [0.2, -0.2] * 800)
+        messages = iter([["Mic: MacBook Pro Microphone (built-in, 48000 Hz)"]])
+
+        def pop_messages():
+            # The user presses Ctrl+C while recording.
+            os.kill(os.getpid(), signal.SIGINT)
+            return next(messages, [])
+
+        def stop():
+            print("<helper stopping>")
+            # ...and again, impatiently, while the helper is still saving.
+            os.kill(os.getpid(), signal.SIGINT)
+
+        recorder.pop_messages.side_effect = pop_messages
+        recorder.stop.side_effect = stop
+
+        mock_ts = self._run(tmp_path, recorder)
+        captured = capsys.readouterr()
+
+        recorder.stop.assert_called_once()
+        mock_ts.assert_called_once()  # the run carried on to transcription
+        assert "Mic: MacBook Pro Microphone" in captured.out
+        assert captured.out.index("Stopping recording, saving audio") < captured.out.index("<helper stopping>")
+        assert "Still saving the recording" in captured.err
+
+    def test_empty_helper_output_is_no_audio_and_points_at_leftover_tracks(self, tmp_path, capsys):
+        recorder = self._recorder()
+        recorder.is_recording = False
+
+        def start(path):
+            # What a killed merge left behind: an empty (4096-byte) output plus raw tracks.
+            path.write_bytes(_avaudiofile_style_header())
+            path.with_name(path.name + ".mic.tmp.wav").write_bytes(_avaudiofile_style_header() + bytes(4000))
+
+        recorder.start.side_effect = start
+        recorder.pop_messages.return_value = []
+
+        with contextlib.suppress(SystemExit):
+            mock_ts = self._run(tmp_path, recorder)
+            mock_ts.assert_not_called()
+        err = capsys.readouterr().err
+
+        assert "No audio was captured" in err
+        assert "recording.wav.mic.tmp.wav" in err
+
+    def test_stop_still_runs_when_the_loop_raises(self, tmp_path):
+        recorder = self._recorder()
+        recorder.is_recording = True
+        recorder.pop_messages.side_effect = RuntimeError("boom")
+
+        with contextlib.suppress(RuntimeError):
+            self._run(tmp_path, recorder)
+
+        recorder.stop.assert_called_once()

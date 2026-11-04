@@ -29,6 +29,10 @@ class AudioRecorder(abc.ABC):
         """Whether the microphone is currently muted."""
         return False
 
+    def pop_messages(self) -> list[str]:
+        """Status/warning lines that arrived since the last call, to show while recording."""
+        return []
+
     @property
     @abc.abstractmethod
     def is_recording(self) -> bool:

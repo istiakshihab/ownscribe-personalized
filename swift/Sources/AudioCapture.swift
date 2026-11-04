@@ -1,6 +1,7 @@
 import ScreenCaptureKit
 import CoreMedia
 import AVFAudio
+import AVFoundation
 import CoreGraphics
 import Foundation
 import AppKit
@@ -16,6 +17,8 @@ private let kMicLoudThreshold: Float = 1e-2
 private let kSystemLoudThreshold: Float = 1e-4
 /// System audio capture and merge output sample rate (mono float32).
 private let kSystemAudioSampleRate: Double = 24000
+/// Seconds of nothing but digital silence before the mic is reported as dead.
+private let kMicSilentAfter: Double = 5
 
 /// Compute peak amplitude across all channels of float audio data.
 func computePeakLevel(in channelData: UnsafePointer<UnsafeMutablePointer<Float>>,
@@ -30,42 +33,225 @@ func computePeakLevel(in channelData: UnsafePointer<UnsafeMutablePointer<Float>>
     return peak
 }
 
-// MARK: - Mic Capture via AVAudioEngine
+// MARK: - Core Audio device helpers
 
-class MicCapture {
-    private let engine = AVAudioEngine()
+private let kSystemObject = AudioObjectID(kAudioObjectSystemObject)
+
+/// Every audio device Core Audio knows about.
+func audioDeviceIDs() -> [AudioDeviceID] {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(kSystemObject, &addr, 0, nil, &size) == noErr else { return [] }
+    var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(kSystemObject, &addr, 0, nil, &size, &ids) == noErr else { return [] }
+    return ids
+}
+
+func deviceName(_ id: AudioDeviceID) -> String {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioObjectPropertyName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var cfName: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &cfName) == noErr,
+          let cfName else { return "(unknown)" }
+    return cfName.takeRetainedValue() as String
+}
+
+/// Number of input channels across all of a device's input streams. The stream
+/// configuration is a variable-length AudioBufferList, so allocate the size Core Audio
+/// reports: the old single-AudioBufferList allocation overflowed the heap for devices
+/// with more than one input stream.
+func inputChannelCount(_ id: AudioDeviceID) -> Int {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: kAudioObjectPropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size > 0 else { return 0 }
+    let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size),
+                                               alignment: MemoryLayout<AudioBufferList>.alignment)
+    defer { raw.deallocate() }
+    let list = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
+    guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, list) == noErr else { return 0 }
+    return UnsafeMutableAudioBufferListPointer(list).reduce(0) { $0 + Int($1.mNumberChannels) }
+}
+
+func transportType(_ id: AudioDeviceID) -> UInt32 {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var type: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &type) == noErr ? type : 0
+}
+
+func isBluetooth(_ id: AudioDeviceID) -> Bool {
+    let type = transportType(id)
+    return type == kAudioDeviceTransportTypeBluetooth || type == kAudioDeviceTransportTypeBluetoothLE
+}
+
+func transportLabel(_ id: AudioDeviceID) -> String {
+    switch transportType(id) {
+    case kAudioDeviceTransportTypeBuiltIn: return "built-in"
+    case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE: return "Bluetooth"
+    case kAudioDeviceTransportTypeUSB: return "USB"
+    case kAudioDeviceTransportTypeVirtual: return "virtual"
+    case kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeAutoAggregate: return "aggregate"
+    case kAudioDeviceTransportTypeDisplayPort, kAudioDeviceTransportTypeHDMI: return "display"
+    case kAudioDeviceTransportTypeContinuityCaptureWired,
+         kAudioDeviceTransportTypeContinuityCaptureWireless: return "iPhone"
+    default: return "other"
+    }
+}
+
+func defaultInputDevice() -> AudioDeviceID? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var id = AudioDeviceID(kAudioObjectUnknown)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(kSystemObject, &addr, 0, nil, &size, &id) == noErr,
+          id != kAudioObjectUnknown else { return nil }
+    return id
+}
+
+/// The Mac's own microphone, if it has one.
+func builtInInputDevice() -> AudioDeviceID? {
+    audioDeviceIDs().first {
+        transportType($0) == kAudioDeviceTransportTypeBuiltIn && inputChannelCount($0) > 0
+    }
+}
+
+/// Find an input device by name: an exact (case-insensitive) match first, then the
+/// first name containing it, so a short name can't grab whichever device enumerates first.
+func findInputDevice(named name: String) throws -> AudioDeviceID {
+    let wanted = name.lowercased()
+    let inputs = audioDeviceIDs().filter { inputChannelCount($0) > 0 }
+    if let exact = inputs.first(where: { deviceName($0).lowercased() == wanted }) {
+        return exact
+    }
+    if let partial = inputs.first(where: { deviceName($0).lowercased().contains(wanted) }) {
+        return partial
+    }
+    throw MicCapture.MicError.deviceNotFound(name)
+}
+
+func deviceUID(_ id: AudioDeviceID) -> String? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceUID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var cfUID: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &cfUID) == noErr,
+          let cfUID else { return nil }
+    return cfUID.takeRetainedValue() as String
+}
+
+func nominalSampleRate(_ id: AudioDeviceID) -> Double {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var rate: Float64 = 0
+    var size = UInt32(MemoryLayout<Float64>.size)
+    return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &rate) == noErr ? rate : 0
+}
+
+// MARK: - Mic Capture via AVCaptureSession
+
+/// Records one microphone to a WAV file.
+///
+/// Built on AVCaptureSession rather than AVAudioEngine. AVAudioEngine's input shares one
+/// I/O unit with its output and runs both through a private aggregate of the default
+/// devices. Pointing that unit at another mic was undone by the engine about 0.1 s after
+/// it started (back to the default, Bluetooth headset included, with the tap left
+/// silent), or failed with -10868, so neither --mic-device nor skipping a headset could
+/// work. A capture session opens exactly the device it is given, never touches output
+/// (so a headset stays out of hands-free mode unless it is the chosen mic), and converts
+/// whatever the device delivers to one fixed format. A device or format change never
+/// reaches the file.
+class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    /// Which input device to record.
+    enum Selection {
+        /// --mic-device: always this device (looked up by name again when devices change).
+        case named(String)
+        /// Follow macOS's default input wherever it moves.
+        case systemDefault
+        /// The default input, unless it is a Bluetooth headset and the Mac has a built-in
+        /// mic. macOS makes a headset the default input the moment it connects, and opening
+        /// its mic forces hands-free mode: 16 kHz, noisy, and the headphones' playback drops
+        /// to the same quality. That was the usual "wrong mic".
+        case avoidBluetooth
+    }
+
+    /// The mic file's format, whatever the device: the capture output converts to it.
+    private static let recordSampleRate: Double = 48000
+
+    private let selection: Selection
+    private let session = AVCaptureSession()
+    private let output = AVCaptureAudioDataOutput()
+    private let sampleQueue = DispatchQueue(label: "com.ownscribe.micCapture", qos: .userInitiated)
+
+    // Written on sampleQueue; read on .main only after stop() has drained the queue.
     private var audioFile: AVAudioFile?
-    private(set) var startHostTime: UInt64 = 0
-
-    // Fixed processing format of the output file. Every tap buffer is normalised to
-    // this before writing, so a mid-stream format change cannot break the writes the
-    // way a fixed AVAudioFile did before (Meet flipping the shared input into
-    // 3-channel voice-processing mode made every write fail with -50, killing the mic).
     private var fileFormat: AVAudioFormat?
     private var audioConverter: AVAudioConverter?
-
+    private(set) var startHostTime: UInt64 = 0
     // Set when a write/convert failure has been logged; reset on the next successful write
-    // so a persistent failure logs once instead of once per tap buffer (~10+/sec). Touched
-    // only from writeBuffer on the tap (render) thread, so it needs no locking.
+    // so a persistent failure logs once instead of once per buffer. sampleQueue only.
     private var loggedWriteError = false
 
-    // Remembered so an explicitly named device can be re-applied after a route change.
-    private var micDeviceName: String?
-
-    // Re-bind the input + reinstall the tap when the audio route changes. The token is
-    // kept so stop() can deregister it. isStopping guards a notification already queued
-    // on .main behind stop(): the observer is delivered on .main and stop() runs on
-    // .main (the SIGINT/SIGTERM sources), so they serialise and the flag alone is enough.
-    private var configObserver: NSObjectProtocol?
+    // .main only: the device being recorded and what has been reported about it.
+    private var currentInput: AVCaptureDeviceInput?
+    private var currentDeviceID: AudioDeviceID?
+    /// The current device is the built-in mic, chosen over a Bluetooth default.
+    private var usingBuiltInOverBluetooth = false
+    /// The built-in mic chosen by .avoidBluetooth delivered only digital silence (a MacBook
+    /// with its lid closed, say), so the default input is used from then on.
+    private var builtInRejected = false
     private var isStopping = false
+    private var healthTimer: DispatchSourceTimer?
+    private var bindTime: UInt64 = 0
+    private var silentWarningActive = false
+    private var observers: [NSObjectProtocol] = []
+    private var hardwareListener: AudioObjectPropertyListenerBlock?
+    private static var hardwareAddresses: [AudioObjectPropertyAddress] = [
+        // Default input moved (a headset connected, the user picked another mic) ...
+        AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                   mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain),
+        // ... or a device came or went (the one being recorded, or a named one returning).
+        AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                   mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain),
+    ]
 
-    // Mute support — guarded by os_unfair_lock (tap callback is on AVAudioEngine thread)
+    // Mute support — guarded by os_unfair_lock (sample callback runs on sampleQueue)
     private var _isMuted = false
     private var _muteLock = os_unfair_lock_s()
 
     // Level tracking for silence timeout (mirrors SystemAudioCapture pattern)
     private var _lastLoudTime: UInt64 = DispatchTime.now().uptimeNanoseconds
     private var _lastLoudTimeLock = os_unfair_lock_s()
+
+    // Mic health: when the device last delivered any non-zero sample. A live mic always
+    // has a noise floor, so exact zeros mean no Microphone permission, a closed lid or a
+    // dead device, which used to record silence without a word.
+    private var _lastSignalTime: UInt64 = 0
+    private var _lastSignalLock = os_unfair_lock_s()
+
+    init(selection: Selection) {
+        self.selection = selection
+        super.init()
+    }
 
     var lastLoudTime: UInt64 {
         os_unfair_lock_lock(&_lastLoudTimeLock)
@@ -79,6 +265,11 @@ class MicCapture {
         return _isMuted
     }
 
+    private var isNamedSelection: Bool {
+        if case .named = selection { return true }
+        return false
+    }
+
     func toggleMute() {
         os_unfair_lock_lock(&_muteLock)
         _isMuted.toggle()
@@ -87,105 +278,234 @@ class MicCapture {
         fputs(muted ? "[MIC_MUTED]\n" : "[MIC_UNMUTED]\n", stderr)
     }
 
-    func start(outputPath: String, deviceName: String?) throws {
-        micDeviceName = deviceName
-        try applyInputDevice()
+    func start(outputPath: String) throws {
+        try Self.ensureMicrophoneAccess()
+        let target = try resolveTarget()
 
-        let format = engine.inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else {
-            throw MicError.noInputAvailable
-        }
-
-        let url = URL(fileURLWithPath: outputPath)
-        let file = try AVAudioFile(forWriting: url,
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Self.recordSampleRate,
+                                   channels: 1, interleaved: false)!
+        let file = try AVAudioFile(forWriting: URL(fileURLWithPath: outputPath),
                                    settings: format.settings,
                                    commonFormat: .pcmFormatFloat32,
                                    interleaved: true)
         audioFile = file
         fileFormat = file.processingFormat
 
-        guard installMicTap() else {
-            throw MicError.noInputAvailable
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: Self.recordSampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: true,
+            AVLinearPCMIsBigEndianKey: false,
+        ]
+        output.setSampleBufferDelegate(self, queue: sampleQueue)
+        guard session.canAddOutput(output) else { throw MicError.noInputAvailable }
+        session.addOutput(output)
+        try attach(target)
+
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .AVCaptureSessionRuntimeError, object: session, queue: .main
+        ) { [weak self] note in
+            let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
+            fputs("Mic reconfigure: capture error\(error.map { ": \($0.localizedDescription)" } ?? ""); restarting.\n", stderr)
+            self?.rebind(reason: "restarting after a capture error.", force: true)
+        })
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.rebind(reason: "audio devices changed; rebinding microphone input.")
         }
+        for var addr in Self.hardwareAddresses {
+            AudioObjectAddPropertyListenerBlock(kSystemObject, &addr, .main, listener)
+        }
+        hardwareListener = listener
 
-        // Earbuds plugged in mid-recording, or a conferencing app reconfiguring the
-        // shared input format, posts this notification (the engine stops itself first).
-        // Rebind + restart so the mic keeps recording instead of silently dying.
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
-        ) { [weak self] _ in self?.handleConfigChange() }
-
-        try engine.start()
+        session.startRunning()
         fputs("Recording microphone audio to \(outputPath)...\n", stderr)
+        didBind()
+        startHealthTimer()
     }
 
-    /// Re-apply the explicitly named input device, if one was requested. When no device
-    /// was named the engine follows the system default input — which is exactly what
-    /// makes "switch to earbuds mid-recording" work, so we deliberately do nothing.
-    private func applyInputDevice() throws {
-        guard let name = micDeviceName else { return }
-        // audioUnit can be nil while the node is in flux during a route change; treat
-        // that as "cannot set device" rather than force-unwrapping into a crash.
-        guard let audioUnit = engine.inputNode.audioUnit else {
-            throw MicError.cannotSetDevice(name)
-        }
-        let deviceID = try findInputDevice(named: name)
-        var id = deviceID
-        let err = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global, 0,
-            &id, UInt32(MemoryLayout<AudioDeviceID>.size))
-        if err != noErr {
-            throw MicError.cannotSetDevice(name)
+    /// Fail up front when the terminal app may not use the microphone: the capture would
+    /// otherwise deliver nothing and the mic track would simply be missing.
+    private static func ensureMicrophoneAccess() throws {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return
+        case .notDetermined:
+            let done = DispatchSemaphore(value: 0)
+            var granted = false
+            AVCaptureDevice.requestAccess(for: .audio) { ok in
+                granted = ok
+                done.signal()
+            }
+            done.wait()
+            if !granted { throw MicError.permissionDenied }
+        default:
+            throw MicError.permissionDenied
         }
     }
 
-    /// Install the capture tap using the input node's current format. Returns false if
-    /// no input is available yet (sample rate 0), e.g. mid-route-change.
-    @discardableResult
-    private func installMicTap() -> Bool {
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else { return false }
-
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, time in
-            guard let self else { return }
-            if self.startHostTime == 0 {
-                self.startHostTime = time.hostTime
+    /// The input device the selection calls for right now.
+    private func resolveTarget() throws -> AudioDeviceID {
+        usingBuiltInOverBluetooth = false
+        switch selection {
+        case .named(let name):
+            return try findInputDevice(named: name)
+        case .systemDefault:
+            break
+        case .avoidBluetooth:
+            if !builtInRejected, let def = defaultInputDevice(), isBluetooth(def),
+               let builtIn = builtInInputDevice() {
+                usingBuiltInOverBluetooth = true
+                return builtIn
             }
-            let muted = self.isMuted
-            if muted, let channelData = buffer.floatChannelData {
-                let channels = Int(buffer.format.channelCount)
-                let frames = Int(buffer.frameLength)
-                for ch in 0..<channels {
-                    memset(channelData[ch], 0, frames * MemoryLayout<Float>.size)
-                }
-            }
-            // Track peak level for silence timeout (muted mic = silence)
-            if !muted, let channelData = buffer.floatChannelData {
-                let peak = computePeakLevel(in: channelData,
-                                     channels: Int(buffer.format.channelCount),
-                                     frames: Int(buffer.frameLength))
-                if peak > kMicLoudThreshold {
-                    os_unfair_lock_lock(&self._lastLoudTimeLock)
-                    self._lastLoudTime = DispatchTime.now().uptimeNanoseconds
-                    os_unfair_lock_unlock(&self._lastLoudTimeLock)
-                }
-            }
-            self.writeBuffer(buffer)
         }
-        return true
+        guard let def = defaultInputDevice() else { throw MicError.noInputAvailable }
+        return def
     }
 
-    /// Write a tap buffer to the file, converting to the file's fixed format whenever
-    /// the incoming format differs (Meet voice-processing mode, or a new device with a
-    /// different sample rate or channel count). The fast path — unchanged format —
-    /// writes directly, exactly as the original code did. On a sample-rate change the
-    /// converter is rebuilt; any sub-buffer of tail samples left inside the old
-    /// converter is dropped (sub-10ms, inaudible for transcription).
+    /// Make `id` the session's input. .main only.
+    private func attach(_ id: AudioDeviceID) throws {
+        guard let device = deviceUID(id).flatMap({ AVCaptureDevice(uniqueID: $0) }) else {
+            throw MicError.cannotSetDevice(deviceName(id))
+        }
+        let input = try AVCaptureDeviceInput(device: device)
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        if let currentInput { session.removeInput(currentInput) }
+        guard session.canAddInput(input) else {
+            if let currentInput, session.canAddInput(currentInput) { session.addInput(currentInput) }
+            throw MicError.cannotSetDevice(deviceName(id))
+        }
+        session.addInput(input)
+        currentInput = input
+        currentDeviceID = id
+    }
+
+    /// Re-pick the device after a device change (or when the health check gives up on the
+    /// built-in mic) and switch to it if it differs. .main only, like stop(), so the two
+    /// never overlap; isStopping drops a notification that was queued behind stop().
+    ///
+    /// The mic file is written continuously with no silence padding, so the moment of a
+    /// switch is not represented as a gap: the mic track drifts slightly earlier relative
+    /// to the system track. Acceptable for transcription and diarization.
+    private func rebind(reason: String, force: Bool = false) {
+        guard !isStopping else { return }
+        var target: AudioDeviceID
+        do {
+            target = try resolveTarget()
+        } catch {
+            guard let def = defaultInputDevice() else {
+                fputs("Mic reconfigure: \(error); no input device is available.\n", stderr)
+                return
+            }
+            fputs("Mic reconfigure: \(error) — falling back to default input.\n", stderr)
+            target = def
+        }
+        if target == currentDeviceID && !force {
+            if !session.isRunning { session.startRunning() }
+            return
+        }
+        fputs("Mic reconfigure: \(reason)\n", stderr)
+        do {
+            try attach(target)
+        } catch {
+            fputs("Mic reconfigure: \(error)\n", stderr)
+            return
+        }
+        if !session.isRunning { session.startRunning() }
+        didBind()
+    }
+
+    /// Reset the silence watchdog and say which mic is now recording. The Python wrapper
+    /// shows [MIC_DEVICE] and [MIC_NOTE] lines live; nothing used to report the device.
+    /// .main only.
+    private func didBind() {
+        bindTime = DispatchTime.now().uptimeNanoseconds
+        silentWarningActive = false
+        guard let id = currentDeviceID else { return }
+        fputs("[MIC_DEVICE] \(deviceName(id)) (\(transportLabel(id)), \(Int(nominalSampleRate(id))) Hz)\n", stderr)
+        if usingBuiltInOverBluetooth, let def = defaultInputDevice() {
+            fputs("[MIC_NOTE] Skipped the default input '\(deviceName(def))': Bluetooth headset mics "
+                  + "record in low-quality hands-free mode. Set mic_device to choose a mic yourself.\n", stderr)
+        } else if isBluetooth(id) && !isNamedSelection {
+            fputs("[MIC_NOTE] '\(deviceName(id))' is a Bluetooth headset mic, which records in low-quality "
+                  + "hands-free mode. Use --mic-device to pick another mic.\n", stderr)
+        }
+    }
+
+    // MARK: Samples (sampleQueue)
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frames > 0, audioFile != nil,
+              let formatDesc = sampleBuffer.formatDescription,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc),
+              let format = AVAudioFormat(streamDescription: asbd),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))
+        else { return }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer, at: 0, frameCount: Int32(frames), into: buffer.mutableAudioBufferList) == noErr
+        else { return }
+
+        if startHostTime == 0 {
+            startHostTime = Self.hostTime(of: sampleBuffer)
+        }
+
+        // Peak of what the device delivered, taken before muting zeroes it: the health
+        // check is about the device, the silence timeout about the recording.
+        let peak = Self.peak(of: buffer)
+        let now = DispatchTime.now().uptimeNanoseconds
+        if peak > 0 {
+            os_unfair_lock_lock(&_lastSignalLock)
+            _lastSignalTime = now
+            os_unfair_lock_unlock(&_lastSignalLock)
+        }
+        if isMuted {
+            for audioBuffer in UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList) {
+                if let data = audioBuffer.mData { memset(data, 0, Int(audioBuffer.mDataByteSize)) }
+            }
+        } else if peak > kMicLoudThreshold {
+            os_unfair_lock_lock(&_lastLoudTimeLock)
+            _lastLoudTime = now
+            os_unfair_lock_unlock(&_lastLoudTimeLock)
+        }
+        writeBuffer(buffer)
+    }
+
+    /// Host time (mach ticks) of the buffer's first sample, for aligning with the system
+    /// track. Falls back to now if the timestamp is missing or not on the host clock.
+    private static func hostTime(of sampleBuffer: CMSampleBuffer) -> UInt64 {
+        let now = mach_absolute_time()
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard pts.isValid else { return now }
+        let ticks = CMClockConvertHostTimeToSystemUnits(pts)
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        let tenSeconds = UInt64(10_000_000_000 * Double(timebase.denom) / Double(timebase.numer))
+        let diff = ticks > now ? ticks - now : now - ticks
+        return diff < tenSeconds ? ticks : now
+    }
+
+    /// Peak amplitude over every float sample in the buffer, whatever its layout.
+    private static func peak(of buffer: AVAudioPCMBuffer) -> Float {
+        var peak: Float = 0
+        for audioBuffer in UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList) {
+            guard let data = audioBuffer.mData else { continue }
+            let samples = data.assumingMemoryBound(to: Float.self)
+            for i in 0..<(Int(audioBuffer.mDataByteSize) / MemoryLayout<Float>.size) {
+                let v = abs(samples[i])
+                if v > peak { peak = v }
+            }
+        }
+        return peak
+    }
+
+    /// Write a buffer to the file, converting if its format isn't the file's. The capture
+    /// output already delivers the file's format, so this is normally a straight write.
     private func writeBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let audioFile, let fileFormat else { return }
         do {
@@ -229,134 +549,91 @@ class MicCapture {
         }
     }
 
-    /// Log a recurring write/convert failure only once until the next successful write, so a
-    /// persistent bad state (e.g. an unconvertible format) doesn't flood stderr at the tap
-    /// rate. Reset by writeBuffer on every successful write. Render-thread only — no locking.
     private func logWriteErrorOnce(_ message: String) {
         guard !loggedWriteError else { return }
         loggedWriteError = true
         fputs(message + "\n", stderr)
     }
 
-    /// Rebind the input and reinstall the tap after an audio route change. Runs on
-    /// .main, so it never overlaps stop(); removeTap quiesces the render thread before
-    /// we touch the tap, and the file/converter stay valid across the swap.
-    ///
-    /// Known limitation: the mic file is written continuously with no silence padding,
-    /// so if the input drops out for a moment during a device switch (e.g. plugging in
-    /// earbuds), the post-switch mic audio is appended immediately and the mic track
-    /// drifts slightly earlier relative to the system track. Acceptable for
-    /// transcription/diarization, and far better than the previous behaviour (losing
-    /// all post-switch mic audio). The common conferencing-app case reconfigures only
-    /// the *format*, not the device, so the converter absorbs it with no gap at all.
-    private func handleConfigChange() {
-        guard !isStopping else { return }
-        fputs("Mic reconfigure: audio route changed; rebinding microphone input.\n", stderr)
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        do {
-            try applyInputDevice()  // re-pin a named device; no-op when following default
-        } catch {
-            fputs("Mic reconfigure: \(error) — falling back to default input.\n", stderr)
-        }
-        reinstallAndStart()
+    // MARK: Health
+
+    private func startHealthTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1.0)
+        timer.setEventHandler { [weak self] in self?.checkMicSignal() }
+        timer.resume()
+        healthTimer = timer
     }
 
-    /// Reinstall the tap and restart the engine. If the input is not ready yet
-    /// (sampleRate 0 while a route is still settling), retry on .main a bounded number
-    /// of times rather than relying on another notification arriving — a single
-    /// transient zero-rate change must not kill the mic for the rest of the session.
-    private func reinstallAndStart(attempt: Int = 0) {
+    /// Once a second on .main: notice a mic that delivers only digital silence (or nothing
+    /// at all). A built-in mic picked over a Bluetooth default is given up on in favour of
+    /// the default; anything else gets a [MIC_SILENT] warning, and a note when it recovers.
+    private func checkMicSignal() {
         guard !isStopping else { return }
-        guard installMicTap() else {
-            let maxAttempts = 20  // ~5s at 0.25s spacing
-            if attempt < maxAttempts {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                    self?.reinstallAndStart(attempt: attempt + 1)
-                }
-            } else {
-                fputs("Mic reconfigure: input did not return after \(maxAttempts) retries; mic stopped.\n", stderr)
+        os_unfair_lock_lock(&_lastSignalLock)
+        let lastSignal = _lastSignalTime
+        os_unfair_lock_unlock(&_lastSignalLock)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let since = max(lastSignal, bindTime)
+        let silentFor = now > since ? Double(now - since) / 1_000_000_000.0 : 0
+
+        if silentFor < kMicSilentAfter {
+            if silentWarningActive {
+                silentWarningActive = false
+                fputs("[MIC_NOTE] Microphone signal is back.\n", stderr)
             }
             return
         }
-        do {
-            try engine.start()
-        } catch {
-            fputs("Mic reconfigure: failed to restart engine: \(error)\n", stderr)
+        if usingBuiltInOverBluetooth && !builtInRejected {
+            builtInRejected = true
+            fputs("[MIC_NOTE] The built-in mic is delivering only silence (lid closed?); "
+                  + "switching to the default input.\n", stderr)
+            rebind(reason: "switching from the silent built-in mic to the default input.")
+            return
         }
+        guard !silentWarningActive else { return }
+        silentWarningActive = true
+        let name = currentDeviceID.map(deviceName) ?? "the microphone"
+        fputs("[MIC_SILENT] '\(name)' has delivered only digital silence for \(Int(kMicSilentAfter)) s, "
+              + "so no mic audio is being recorded. Check System Settings > Privacy & Security > Microphone "
+              + "for your terminal app, or pick another mic with --mic-device.\n", stderr)
     }
 
     func stop() {
         isStopping = true
-        if let token = configObserver {
-            NotificationCenter.default.removeObserver(token)
-            configObserver = nil
+        healthTimer?.cancel()
+        healthTimer = nil
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        observers = []
+        if let listener = hardwareListener {
+            for var addr in Self.hardwareAddresses {
+                AudioObjectRemovePropertyListenerBlock(kSystemObject, &addr, .main, listener)
+            }
+            hardwareListener = nil
         }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        audioFile = nil
+        session.stopRunning()
+        // A sample callback may still be running; release (and so finalize) the file on its
+        // queue so the two can't race.
+        sampleQueue.sync { self.audioFile = nil }
     }
 
     enum MicError: Error, CustomStringConvertible {
         case deviceNotFound(String)
         case cannotSetDevice(String)
         case noInputAvailable
+        case permissionDenied
 
         var description: String {
             switch self {
             case .deviceNotFound(let n): return "Input device not found: \(n)"
-            case .cannotSetDevice(let n): return "Cannot set input device: \(n)"
-            case .noInputAvailable: return "No audio input available (sample rate is 0)"
+            case .cannotSetDevice(let n): return "Cannot record from input device: \(n)"
+            case .noInputAvailable: return "No audio input device available"
+            case .permissionDenied:
+                return "Microphone access is denied for your terminal app "
+                    + "(System Settings > Privacy & Security > Microphone)"
             }
         }
     }
-}
-
-/// Find an input audio device by name, returning its AudioDeviceID.
-func findInputDevice(named name: String) throws -> AudioDeviceID {
-    var propAddress = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDevices,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-
-    var dataSize: UInt32 = 0
-    AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject),
-                                    &propAddress, 0, nil, &dataSize)
-    let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-    var devices = [AudioDeviceID](repeating: 0, count: deviceCount)
-    AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                &propAddress, 0, nil, &dataSize, &devices)
-
-    for deviceID in devices {
-        // Get device name
-        var nameAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var cfNameRef: Unmanaged<CFString>?
-        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        AudioObjectGetPropertyData(deviceID, &nameAddr, 0, nil, &nameSize, &cfNameRef)
-        let deviceName = cfNameRef?.takeRetainedValue() as String? ?? "(unknown)"
-
-        // Check input channel count
-        var inputAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain)
-        var bufSize: UInt32 = 0
-        AudioObjectGetPropertyDataSize(deviceID, &inputAddr, 0, nil, &bufSize)
-        if bufSize > 0 {
-            let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-            defer { bufferList.deallocate() }
-            AudioObjectGetPropertyData(deviceID, &inputAddr, 0, nil, &bufSize, bufferList)
-            let inputChannels = UnsafeMutableAudioBufferListPointer(bufferList)
-                .reduce(0) { $0 + Int($1.mNumberChannels) }
-            if inputChannels > 0 && deviceName.lowercased().contains(name.lowercased()) {
-                return deviceID
-            }
-        }
-    }
-    throw MicCapture.MicError.deviceNotFound(name)
 }
 
 // MARK: - System Audio Capture via ScreenCaptureKit
@@ -378,9 +655,15 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
     private var silenceChecked: Bool = false
     private var silenceWarned: Bool = false
 
+    // Set when a write failure has been logged; reset on the next good write, so a
+    // persistent failure logs once instead of once per buffer. Capture queue only.
+    private var loggedWriteError = false
+
     // Silence timeout auto-stop
     var silenceTimeout: TimeInterval = 0  // seconds; 0 = disabled
     var onSilenceTimeout: (() -> Void)?
+    /// Called on .main when the user cancels the content picker.
+    var onCancel: (() -> Void)?
     var micCapture: MicCapture?  // checked by silence timer
     private var lastLoudTime: UInt64 = DispatchTime.now().uptimeNanoseconds
     private var lastLoudTimeLock = os_unfair_lock_s()
@@ -391,6 +674,8 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
 
     // Picker continuation
     private var startContinuation: CheckedContinuation<Void, Error>?
+    /// The picker has already chosen content and capture is starting or running (.main only).
+    private var captureRequested = false
 
     init(outputPath: String) {
         self.outputPath = outputPath
@@ -425,6 +710,30 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
     // MARK: - SCContentSharingPickerObserver
 
     func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
+        DispatchQueue.main.async { self.handlePickedContent(filter) }
+    }
+
+    /// The picker reports again whenever the shared content is changed later (e.g. from
+    /// the menu-bar sharing indicator). Starting a second capture then reopened, and so
+    /// truncated, the system audio file, and left the first stream and silence timer
+    /// running. Retarget the running stream instead. .main only.
+    private func handlePickedContent(_ filter: SCContentFilter) {
+        guard !captureRequested else {
+            guard let stream else {
+                fputs("Shared content changed while capture was still starting; keeping the first choice.\n", stderr)
+                return
+            }
+            Task {
+                do {
+                    try await stream.updateContentFilter(filter)
+                    fputs("Shared content changed; system audio continues in the same recording.\n", stderr)
+                } catch {
+                    fputs("Could not switch the shared content: \(error)\n", stderr)
+                }
+            }
+            return
+        }
+        captureRequested = true
         Task {
             do {
                 try await self.beginCapture(with: filter)
@@ -438,8 +747,10 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
     }
 
     func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
-        fputs("Content picker cancelled.\n", stderr)
-        exit(0)
+        // This used to exit(0) on the spot, throwing away the mic audio recorded while the
+        // picker was open (the mic file was never even finalised). Stop and save instead.
+        fputs("Content picker cancelled; stopping and saving what was recorded.\n", stderr)
+        DispatchQueue.main.async { self.onCancel?() }
     }
 
     func contentSharingPickerStartDidFailWithError(_ error: Error) {
@@ -570,8 +881,14 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
                     try audioFile.write(from: outBuffer)
                 }
             }
+            loggedWriteError = false
         } catch {
-            fputs("Write error: \(error)\n", stderr)
+            // Once per failure streak: at one line per buffer a persistent error used to
+            // flood stderr.
+            if !loggedWriteError {
+                loggedWriteError = true
+                fputs("Write error: \(error)\n", stderr)
+            }
         }
 
         totalFrames += Int64(frameCount)
@@ -629,8 +946,10 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
         }
         _ = sem.wait(timeout: .now() + 2)
 
-        // AVAudioFile finalizes on close
-        audioFile = nil
+        // Release the file on the capture queue. A sample-handler call can still be running
+        // (stopCapture may have timed out above), and nil-ing the file from .main raced it.
+        // Later callbacks see nil and return. AVAudioFile finalizes on close.
+        captureQueue.sync { self.audioFile = nil }
 
         let seconds = Double(totalFrames) / kSystemAudioSampleRate
         fputs("Saved \(outputPath) (\(String(format: "%.1f", seconds)) seconds, peak=\(String(format: "%.6f", peakLevel)))\n", stderr)
@@ -666,85 +985,44 @@ func listAudioApps() {
 // MARK: - List input devices
 
 func listInputDevices() {
-    // Get default input device
-    var defaultAddr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDefaultInputDevice,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-    var defaultDevice: AudioDeviceID = 0
-    var defaultSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-    AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                &defaultAddr, 0, nil, &defaultSize, &defaultDevice)
-
-    // Enumerate all devices
-    var propAddress = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDevices,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-
-    var dataSize: UInt32 = 0
-    AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject),
-                                    &propAddress, 0, nil, &dataSize)
-    let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-    var devices = [AudioDeviceID](repeating: 0, count: deviceCount)
-    AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                &propAddress, 0, nil, &dataSize, &devices)
-
+    let defaultDevice = defaultInputDevice()
     print("Input devices:")
-    for deviceID in devices {
-        // Get device name
-        var nameAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var cfNameRef: Unmanaged<CFString>?
-        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        AudioObjectGetPropertyData(deviceID, &nameAddr, 0, nil, &nameSize, &cfNameRef)
-        let name = cfNameRef?.takeRetainedValue() as String? ?? "(unknown)"
-
-        // Check input channel count
-        var inputAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain)
-        var bufSize: UInt32 = 0
-        AudioObjectGetPropertyDataSize(deviceID, &inputAddr, 0, nil, &bufSize)
-        guard bufSize > 0 else { continue }
-
-        let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-        defer { bufferList.deallocate() }
-        AudioObjectGetPropertyData(deviceID, &inputAddr, 0, nil, &bufSize, bufferList)
-        let inputChannels = UnsafeMutableAudioBufferListPointer(bufferList)
-            .reduce(0) { $0 + Int($1.mNumberChannels) }
-
-        if inputChannels > 0 {
-            let suffix = (deviceID == defaultDevice) ? " (default)" : ""
-            print("  \(name)\(suffix)")
-        }
+    for id in audioDeviceIDs() where inputChannelCount(id) > 0 {
+        var tags = [transportLabel(id)]
+        if id == defaultDevice { tags.append("default") }
+        print("  \(deviceName(id)) (\(tags.joined(separator: ", ")))")
     }
 }
 
 // MARK: - Merge audio files with timestamp alignment
 
+/// Frame count of an audio file, or 0 when it is missing or unreadable.
+func audioFrameCount(atPath path: String) -> AVAudioFramePosition {
+    guard FileManager.default.fileExists(atPath: path),
+          let file = try? AVAudioFile(forReading: URL(fileURLWithPath: path)) else { return 0 }
+    return file.length
+}
+
 func mergeAudioFiles(systemPath: String, micPath: String,
                      systemStartHostTime: UInt64, micStartHostTime: UInt64,
-                     outputPath: String) throws {
-    // A standard WAV file header (RIFF + fmt + data chunk header) is 44 bytes.
-    // Files at or below this size contain no audio frames.
-    let wavHeaderSize = 44
+                     sessionStartHostTime: UInt64, outputPath: String) throws {
     let fm = FileManager.default
-    let systemFileSize = (try? fm.attributesOfItem(atPath: systemPath)[.size] as? Int) ?? 0
-    let micFileSize = (try? fm.attributesOfItem(atPath: micPath)[.size] as? Int) ?? 0
+    // Judge "empty" by frame count, not file size. AVAudioFile pads the WAV header to
+    // 4096 bytes, so the old "<= 44 bytes" check never saw an empty track, and an empty
+    // track also has no start time, which wrecked the offset below.
+    let systemFrames = audioFrameCount(atPath: systemPath)
+    let micFrames = audioFrameCount(atPath: micPath)
 
     // Both empty — clean up temp files and let the caller handle it
-    if systemFileSize <= wavHeaderSize && micFileSize <= wavHeaderSize {
+    if systemFrames == 0 && micFrames == 0 {
         try? fm.removeItem(atPath: systemPath)
         try? fm.removeItem(atPath: micPath)
+        fputs("No audio was captured (system and mic tracks are both empty).\n", stderr)
         return
     }
 
     // Mic empty but system has data — just rename system file
-    if micFileSize <= wavHeaderSize && systemFileSize > wavHeaderSize {
+    if micFrames == 0 {
         try? fm.removeItem(atPath: micPath)
         try fm.moveItem(atPath: systemPath, toPath: outputPath)
         fputs("Merged audio saved to \(outputPath) (system only, no mic audio)\n", stderr)
@@ -752,25 +1030,31 @@ func mergeAudioFiles(systemPath: String, micPath: String,
     }
 
     // Open files — system is optional (may be empty when only mic captured audio)
-    let systemFile: AVAudioFile? = systemFileSize > wavHeaderSize
+    let systemFile: AVAudioFile? = systemFrames > 0
         ? try AVAudioFile(forReading: URL(fileURLWithPath: systemPath)) : nil
     let micFile = try AVAudioFile(forReading: URL(fileURLWithPath: micPath))
 
     let outputSampleRate: Double = kSystemAudioSampleRate
     let outputChannels: AVAudioChannelCount = 1
 
-    // Compute offset in seconds between the two start times using mach_timebase_info
-    let offsetFrames: Int64
+    // Align the tracks by when each delivered its first buffer. A start time of 0 means
+    // the track never delivered one, and a time before this session began is bogus.
+    // Either used to make the offset the Mac's whole awake time: tens of GB of leading
+    // silence that took longer to write than the wrapper waits, so the merge was killed
+    // half-way. With both start times inside the session, the offset can't exceed it.
+    func plausible(_ hostTime: UInt64) -> Bool { hostTime != 0 && hostTime >= sessionStartHostTime }
+    var offsetFrames: Int64 = 0
     if systemFile != nil {
-        var timebase = mach_timebase_info_data_t()
-        mach_timebase_info(&timebase)
-        let ticksToNanos = Double(timebase.numer) / Double(timebase.denom)
-        let systemStartNanos = Double(systemStartHostTime) * ticksToNanos
-        let micStartNanos = Double(micStartHostTime) * ticksToNanos
-        let offsetSeconds = (micStartNanos - systemStartNanos) / 1_000_000_000.0
-        offsetFrames = Int64(offsetSeconds * outputSampleRate)
-    } else {
-        offsetFrames = 0
+        if plausible(systemStartHostTime) && plausible(micStartHostTime) {
+            var timebase = mach_timebase_info_data_t()
+            mach_timebase_info(&timebase)
+            let ticksToNanos = Double(timebase.numer) / Double(timebase.denom)
+            let offsetTicks = Double(micStartHostTime) - Double(systemStartHostTime)
+            let offsetSeconds = offsetTicks * ticksToNanos / 1_000_000_000.0
+            offsetFrames = Int64(offsetSeconds * outputSampleRate)
+        } else {
+            fputs("Warning: a track has no start time; aligning system and mic audio at the start.\n", stderr)
+        }
     }
     let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                       sampleRate: outputSampleRate,
@@ -912,7 +1196,8 @@ func printUsage() {
     ownscribe-audio — system audio capture helper
 
     USAGE:
-        ownscribe-audio capture --output FILE [--mic] [--mic-device NAME] [--silence-timeout N]
+        ownscribe-audio capture --output FILE [--mic] [--mic-device NAME] [--avoid-bluetooth-mic]
+                                [--capture-mode-all] [--silence-timeout N]
         ownscribe-audio list-apps
         ownscribe-audio list-devices
 
@@ -920,6 +1205,9 @@ func printUsage() {
         --output, -o FILE    Output WAV file path (required for capture)
         --mic                Also capture microphone input
         --mic-device NAME    Use specific mic input device (implies --mic)
+        --avoid-bluetooth-mic
+                             With --mic and no --mic-device: when the default input is a
+                             Bluetooth headset, record the built-in mic instead
         --capture-mode-all   Capture all system audio without showing the source picker
         --silence-timeout N  Auto-stop after N seconds of silence (0 = disabled)
         --help, -h           Show this help
@@ -949,6 +1237,11 @@ func main() {
         listInputDevices()
 
     case "capture":
+        // The Python wrapper reads our stderr through a pipe. If it goes away (a second
+        // Ctrl+C, a crash), the next write would raise SIGPIPE and kill us mid-merge,
+        // losing the recording. Ignore it: writes then just fail with EPIPE.
+        signal(SIGPIPE, SIG_IGN)
+
         // Initialize NSApplication so the picker GUI can render
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -956,6 +1249,7 @@ func main() {
         var outputPath: String?
         var enableMic = false
         var micDeviceName: String?
+        var avoidBluetoothMic = false
         var captureModeAll = false
         var silenceTimeout: TimeInterval = 0
 
@@ -981,6 +1275,8 @@ func main() {
                 }
                 micDeviceName = args[i]
                 enableMic = true  // --mic-device implies --mic
+            case "--avoid-bluetooth-mic":
+                avoidBluetoothMic = true
             case "--silence-timeout":
                 i += 1
                 guard i < args.count, let val = TimeInterval(args[i]) else {
@@ -1015,20 +1311,16 @@ func main() {
         capture.silenceTimeout = silenceTimeout
         var micCapture: MicCapture?
 
-        if enableMic {
-            let mic = MicCapture()
-            do {
-                try mic.start(outputPath: micPath, deviceName: micDeviceName)
-            } catch {
-                fputs("Error starting mic capture: \(error)\n", stderr)
-                exit(1)
-            }
-            micCapture = mic
-            capture.micCapture = mic
-        }
+        // Host time before either track can start: the merge rejects any track start
+        // time earlier than this (or 0, meaning the track never delivered audio).
+        let sessionStartHostTime = mach_absolute_time()
 
-        // Shared shutdown logic for SIGINT, SIGTERM, and silence timeout
+        // Shared shutdown logic for SIGINT, SIGTERM, the silence timeout and a cancelled
+        // picker. All of them arrive on .main; only the first one may run.
+        var shuttingDown = false
         let shutdown: () -> Void = {
+            guard !shuttingDown else { return }
+            shuttingDown = true
             capture.stop()
             if let mic = micCapture {
                 mic.stop()
@@ -1038,6 +1330,7 @@ func main() {
                         micPath: micPath,
                         systemStartHostTime: capture.startHostTime,
                         micStartHostTime: mic.startHostTime,
+                        sessionStartHostTime: sessionStartHostTime,
                         outputPath: output)
                 } catch {
                     fputs("Error merging audio: \(error)\n", stderr)
@@ -1047,6 +1340,39 @@ func main() {
         }
 
         capture.onSilenceTimeout = shutdown
+        capture.onCancel = shutdown
+
+        // Handle Ctrl+C gracefully. Installed before the mic starts, so an early SIGINT
+        // can't hit the default action and kill the process with nothing saved.
+        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        signal(SIGINT, SIG_IGN)
+        sigintSource.setEventHandler { shutdown() }
+        sigintSource.resume()
+
+        let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        signal(SIGTERM, SIG_IGN)
+        sigtermSource.setEventHandler { shutdown() }
+        sigtermSource.resume()
+
+        if enableMic {
+            let selection: MicCapture.Selection
+            if let name = micDeviceName {
+                selection = .named(name)
+            } else if avoidBluetoothMic {
+                selection = .avoidBluetooth
+            } else {
+                selection = .systemDefault
+            }
+            let mic = MicCapture(selection: selection)
+            do {
+                try mic.start(outputPath: micPath)
+            } catch {
+                fputs("Error starting mic capture: \(error)\n", stderr)
+                exit(1)
+            }
+            micCapture = mic
+            capture.micCapture = mic
+        }
 
         // Toggle mic mute on SIGUSR1 (sent by Python wrapper)
         var _sigusr1Source: DispatchSourceSignal?  // retained to keep source alive
@@ -1058,17 +1384,6 @@ func main() {
             _sigusr1Source = src
         }
         _ = _sigusr1Source
-
-        // Handle Ctrl+C gracefully
-        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        signal(SIGINT, SIG_IGN)
-        sigintSource.setEventHandler { shutdown() }
-        sigintSource.resume()
-
-        let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        signal(SIGTERM, SIG_IGN)
-        sigtermSource.setEventHandler { shutdown() }
-        sigtermSource.resume()
 
         Task {
             do {

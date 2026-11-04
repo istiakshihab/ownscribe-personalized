@@ -16,6 +16,7 @@ backend = "coreaudio"     # "coreaudio" (default) or "sounddevice"
 device = ""               # empty = system audio; or device name/index for sounddevice
 mic = true                # also capture microphone input
 mic_device = ""           # specific mic device name (empty = default)
+mic_avoid_bluetooth = true  # with no mic_device: record the built-in mic when the default input is a Bluetooth headset
 capture_mode = "all"      # "all" = capture all system audio directly; "picker" = show source picker
 silence_timeout = 300     # seconds of silence before auto-stop; 0 = disabled
 
@@ -70,6 +71,10 @@ class AudioConfig:
     device: str = ""
     mic: bool = True
     mic_device: str = ""
+    # With no mic_device: when macOS's default input is a Bluetooth headset, record the
+    # built-in mic instead. A headset mic records in 16 kHz hands-free mode (and drags the
+    # headphones' playback down with it); macOS makes it the default as soon as it connects.
+    mic_avoid_bluetooth: bool = True
     capture_mode: str = "all"  # "all" = all system audio; "picker" = show source picker
     silence_timeout: int = 300  # seconds of silence before auto-stop; 0 = disabled
 
