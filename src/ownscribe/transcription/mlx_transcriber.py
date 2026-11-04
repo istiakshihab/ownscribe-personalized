@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import logging
 import os
+import re
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -22,6 +25,66 @@ from ownscribe.transcription.base import Transcriber
 from ownscribe.transcription.models import Segment, TranscriptResult, Word
 
 _SAMPLE_RATE = 16000
+
+# mlx-whisper's verbose output: "[MM:SS.mmm --> MM:SS.mmm] text", with "HH:" only past an hour.
+_SEGMENT_LINE_RE = re.compile(
+    r"^\[(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3}) --> (?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})\]\s?(.*)$"
+)
+
+
+def parse_segment_line(line: str) -> tuple[float, float, str] | None:
+    """Parse one verbose mlx-whisper line into (start, end, text), or None for anything else."""
+    m = _SEGMENT_LINE_RE.match(line.strip())
+    if not m:
+        return None
+    g = m.groups()
+
+    def secs(h, mm, ss, ms):
+        return int(h or 0) * 3600 + int(mm) * 60 + int(ss) + int(ms) / 1000
+
+    return secs(*g[0:4]), secs(*g[4:8]), g[8].strip()
+
+
+class SegmentLineWriter(io.TextIOBase):
+    """File-like stdout replacement that turns verbose mlx-whisper lines into callbacks.
+
+    Reports each non-empty segment and progress as the furthest segment end over the audio
+    duration (the tqdm bar is off in verbose mode). Other lines ("Detected language: ...") are
+    dropped. A segment Whisper later blanks out may still be reported; the final transcript wins.
+    """
+
+    def __init__(self, on_segment, duration: float, on_progress=None) -> None:
+        self._on_segment = on_segment
+        self._duration = duration
+        self._on_progress = on_progress
+        self._buffer = ""
+        self._furthest = 0.0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._handle(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._handle(self._buffer)
+            self._buffer = ""
+
+    def _handle(self, line: str) -> None:
+        parsed = parse_segment_line(line)
+        if parsed is None:
+            return
+        start, end, text = parsed
+        if text and end > start:
+            self._on_segment(start, end, text)
+        self._furthest = max(self._furthest, end)
+        if self._on_progress is not None and self._duration > 0:
+            self._on_progress(min(1.0, self._furthest / self._duration))
 
 # mlx-community publishes MLX-converted Whisper weights under this naming
 # scheme for the standard (fp16) variant of each size. Anything not in this
@@ -45,11 +108,14 @@ class MLXWhisperTranscriber(Transcriber):
         diarization_config: DiarizationConfig | None = None,
         progress: NullProgress | None = None,
         need_word_timestamps: bool = False,
+        on_segment: Callable[[float, float, str], None] | None = None,
     ) -> None:
         self._tx_config = transcription_config
         self._diar_config = diarization_config
         self._progress = progress or NullProgress()
         self._need_word_timestamps = need_word_timestamps
+        # When set (GUI jobs), segments are reported live as Whisper decodes them.
+        self._on_segment = on_segment
         self._model_repo = self._resolve_model_repo()
         self._model_loaded = False
         self._diarize_model = None
@@ -240,15 +306,32 @@ class MLXWhisperTranscriber(Transcriber):
                         progress.update("transcribing", fraction)
 
                 tx_writer = DownloadProgressWriter(_on_decode_progress)
-                with contextlib.redirect_stderr(tx_writer):
-                    result = mlx_whisper.transcribe(
-                        audio,
-                        path_or_hf_repo=self._model_repo,
-                        language=self._tx_config.language or None,
-                        initial_prompt=initial_prompt,
-                        word_timestamps=self._wants_word_timestamps(),
-                        verbose=False,
-                    )
+                if self._on_segment is not None:
+                    # Live segments: verbose=True prints each segment as it is decoded (and
+                    # turns the tqdm bar off), so progress comes from how far they reach.
+                    duration = len(audio) / _SAMPLE_RATE
+                    seg_writer = SegmentLineWriter(self._on_segment, duration,
+                                                   lambda f: progress.update("transcribing", f))
+                    with contextlib.redirect_stderr(tx_writer), contextlib.redirect_stdout(seg_writer):
+                        result = mlx_whisper.transcribe(
+                            audio,
+                            path_or_hf_repo=self._model_repo,
+                            language=self._tx_config.language or None,
+                            initial_prompt=initial_prompt,
+                            word_timestamps=self._wants_word_timestamps(),
+                            verbose=True,
+                        )
+                    seg_writer.flush()
+                else:
+                    with contextlib.redirect_stderr(tx_writer):
+                        result = mlx_whisper.transcribe(
+                            audio,
+                            path_or_hf_repo=self._model_repo,
+                            language=self._tx_config.language or None,
+                            initial_prompt=initial_prompt,
+                            word_timestamps=self._wants_word_timestamps(),
+                            verbose=False,
+                        )
                 tx_writer.flush()
 
                 language = result.get("language", "")

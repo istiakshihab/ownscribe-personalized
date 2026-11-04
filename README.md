@@ -178,6 +178,23 @@ ownscribe config                   # open config file in $EDITOR
 ownscribe cleanup                  # remove ownscribe data from disk
 ```
 
+### Driving ownscribe from an app
+
+A GUI (the planned SwiftUI app) records with `bin/ownscribe-audio capture --session DIR --control stdio`
+and runs each processing step as a job that reports JSON events. See [docs/engine-protocol.md](docs/engine-protocol.md);
+`scripts/mock_engine.py` fakes both halves and `scripts/engine_demo.py` drives the real ones from a terminal.
+
+```bash
+ownscribe session new --json                     # create a session folder for a recording
+ownscribe process SESSION --events-fd 3          # transcribe, diarize, summarize with progress events
+ownscribe speakers SESSION --set SPEAKER_00=Alice # name speakers; re-renders transcript and summary
+ownscribe resummarize SESSION --template brief   # summarize again with another template
+ownscribe file SESSION --preview | --write       # Obsidian vault note: preview, then write
+ownscribe sessions --json                        # list recordings and their processing status
+ownscribe templates --json                       # built-in and custom summary templates
+ownscribe doctor                                 # ffmpeg, HF token, claude, models, disk space
+```
+
 > **Video files work too.** Anywhere ownscribe accepts an audio file it also accepts a video container (mp4, mov, mkv, m4v) — it extracts the audio track via ffmpeg. To turn a recording into full notes, drop it in a folder and run `ownscribe resume ./that-folder/` (transcript + summary); use `ownscribe transcribe meeting.mp4` for a transcript only.
 
 `transcribe` and `resume` also run the [Obsidian vault-filing](#obsidian-vault-filing) step, same as a live recording — they share the same underlying pipeline.

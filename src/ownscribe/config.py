@@ -62,6 +62,11 @@ enabled = true             # file every transcript into the vault as a categoriz
 vault_dir = "~/Documents/obsidian/Personal"
 claude_bin = ""             # path to the claude CLI; empty = auto-detect via PATH
 confirm_before_filing = true  # show the proposed note and ask before writing it (skipped when not a TTY)
+
+[paths]
+# A GUI app starts ownscribe with a minimal PATH; point at tools it can't find there.
+ffmpeg = ""               # e.g. /opt/homebrew/bin/ffmpeg
+claude = ""               # claude CLI, used when obsidian.claude_bin is empty
 """
 
 
@@ -148,6 +153,12 @@ class ObsidianConfig:
 
 
 @dataclass
+class PathsConfig:
+    ffmpeg: str = ""  # GUI-launched jobs get launchd's minimal PATH
+    claude: str = ""
+
+
+@dataclass
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
@@ -155,6 +166,7 @@ class Config:
     summarization: SummarizationConfig = field(default_factory=SummarizationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     obsidian: ObsidianConfig = field(default_factory=ObsidianConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
     templates: dict[str, TemplateConfig] = field(default_factory=dict)
 
     @classmethod
@@ -209,6 +221,11 @@ def _merge_toml(config: Config, data: dict) -> Config:
         for k, v in data["obsidian"].items():
             if hasattr(config.obsidian, k):
                 setattr(config.obsidian, k, v)
+
+    if "paths" in data:
+        for k, v in data["paths"].items():
+            if hasattr(config.paths, k):
+                setattr(config.paths, k, v)
 
     if "templates" in data:
         for name, t_data in data["templates"].items():

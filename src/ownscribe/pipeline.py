@@ -103,6 +103,11 @@ def _get_output_dir(config: Config) -> Path:
     base = config.output.resolved_dir
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     out_dir = base / timestamp
+    # Two recordings started in the same minute must not share (and overwrite) one folder.
+    suffix = 2
+    while out_dir.exists() and any(out_dir.iterdir()):
+        out_dir = base / f"{timestamp}-{suffix}"
+        suffix += 1
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
@@ -394,13 +399,16 @@ def run_transcribe(config: Config, audio_file: str) -> None:
     _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
 
 
-def run_warmup(config: Config) -> None:
-    """Prefetch transcription/diarization models without processing audio."""
+def run_warmup(config: Config, progress_factory=None) -> None:
+    """Prefetch transcription/diarization models without processing audio.
+
+    ``progress_factory`` replaces the terminal checklist (a GUI passes EventProgress).
+    """
     diar_enabled = config.diarization.enabled and bool(config.diarization.hf_token)
     hf_token_warning = config.diarization.enabled and not config.diarization.hf_token
     local_sum = config.summarization.enabled and config.summarization.backend == "local"
 
-    with PipelineProgress(
+    with (progress_factory or PipelineProgress)(
         diarize=False,
         summarize=False,
         transcribe=False,
@@ -661,6 +669,25 @@ def _do_transcribe_and_summarize(
     # Written here (not inside the TUI) so it reflects any names just assigned above.
     transcript_str, _ = _format_output(config, result)
     transcript_path.write_text(transcript_str)
+
+    # Rename to the title before filing, so the vault note links to the folder's final name.
+    if summary is not None and title_slug:
+        out_dir, old_out_dir = _rename_output_dir(out_dir, title_slug), out_dir
+        audio_dir = audio_path.parent
+        # If the audio lives in its own directory (separate audio_dir
+        # configured and the recording not colocated with the text output,
+        # as when resuming a directory recorded before audio_dir was set),
+        # rename it like out_dir, but only if out_dir was renamed
+        # successfully.
+        if config.output.uses_separate_audio_dir and audio_dir != old_out_dir:
+            if out_dir != old_out_dir:
+                audio_dir = _rename_output_dir(audio_dir, title_slug)
+        # Otherwise the audio follows out_dir: adjust audio_dir and
+        # audio_path according to the new name of out_dir.
+        else:
+            audio_dir = out_dir
+        audio_path = audio_dir / audio_path.name
+        transcript_path = out_dir / transcript_path.name
     click.echo(f"Transcript saved to {transcript_path}")
 
     if vault_filing_enabled:
@@ -729,22 +756,6 @@ def _do_transcribe_and_summarize(
         # summary.json holds machine-readable JSON; the console still shows the text.
         displayed = summary if config.output.format == "json" else (summary_str or summary)
         click.echo(f"\n{displayed}")
-        if title_slug:
-            out_dir, old_out_dir = _rename_output_dir(out_dir, title_slug), out_dir
-            audio_dir = audio_path.parent
-            # If the audio lives in its own directory (separate audio_dir
-            # configured and the recording not colocated with the text output,
-            # as when resuming a directory recorded before audio_dir was set),
-            # rename it like out_dir, but only if out_dir was renamed
-            # successfully.
-            if config.output.uses_separate_audio_dir and audio_dir != old_out_dir:
-                if out_dir != old_out_dir:
-                    audio_dir = _rename_output_dir(audio_dir, title_slug)
-            # Otherwise the audio follows out_dir: adjust audio_dir and
-            # audio_path according to the new name of out_dir.
-            else:
-                audio_dir = out_dir
-            audio_path = audio_dir / audio_path.name
     elif not summarize:
         click.echo(f"\n{transcript_str}")
 

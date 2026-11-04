@@ -99,9 +99,13 @@ class Summarizer(abc.ABC):
 
     # -- summarization -------------------------------------------------------
 
-    def summarize(self, transcript_text: str) -> str:
-        """Summarize a transcript, splitting it up when it does not fit the window."""
-        system, prompt = resolve_template(self._config.template, self._templates)
+    def summarize(self, transcript_text: str, template: str | None = None) -> str:
+        """Summarize a transcript, splitting it up when it does not fit the window.
+
+        ``template`` overrides ``config.summarization.template`` for this call (GUI jobs pick it
+        per run instead of mutating shared config).
+        """
+        system, prompt = resolve_template(template or self._config.template, self._templates)
         text = transcript_text.strip()
         budget = self._input_budget(system, prompt)
 

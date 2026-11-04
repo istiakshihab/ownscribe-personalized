@@ -34,6 +34,7 @@ def run_claude(prompt: str, claude_bin: str, *, cwd: Path, timeout: int = 600) -
     result = subprocess.run(
         [claude_bin, "-p", prompt, "--output-format", "json", "--allowedTools", "", "--model", "sonnet"],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         timeout=timeout,
         # Isolated cwd (no CLAUDE.md/.claude project config here) so this

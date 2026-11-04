@@ -495,3 +495,68 @@ class NullProgress:
 
     def diarization_hook(self, step_name: str, _artifact, **kwargs) -> None:
         pass
+
+
+class EventProgress(PipelineProgress):
+    """PipelineProgress that reports to a GUI as JSON ``stage`` events instead of drawing a TUI.
+
+    Only rendering is replaced: begin/complete/update, sub-step auto-completion and the
+    diarization hook behave exactly as in the terminal. Each render (at most every 0.1 s, plus
+    a final one) sends just the steps whose status, fraction or detail changed.
+    """
+
+    def __init__(self, sink, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._sink = sink
+        self._failed: set[str] = set()
+        self._sent: dict[str, tuple] = {}
+        self._parents: dict[str, str] = {}
+        parent = None
+        for step in self._steps:
+            if step.indent == 0:
+                parent = step.key
+            elif parent is not None:
+                self._parents[step.key] = parent
+
+    def fail(self, key: str) -> None:
+        with self._lock:
+            self._failed.add(key)
+        super().fail(key)
+        self._render_all()
+
+    def complete(self, key: str) -> None:
+        super().complete(key)
+        self._render_all()
+
+    def _render_all(self, *, final: bool = False) -> None:
+        with self._lock:
+            active = set(self._active)
+            completed = set(self._completed)
+            failed = set(self._failed)
+            progress = dict(self._progress)
+            details = dict(self._details)
+            for step in self._steps:
+                key = step.key
+                if key in failed:
+                    status = "failed"
+                elif key in completed:
+                    status = "done"
+                elif key in active:
+                    status = "running"
+                else:
+                    continue  # not started yet
+                fraction = progress.get(key)
+                if fraction is not None:
+                    fraction = round(fraction, 3)
+                state = (status, fraction, details.get(key))
+                if self._sent.get(key) == state:
+                    continue
+                self._sent[key] = state
+                fields = {"stage": key, "status": status}
+                if key in self._parents:
+                    fields["parent"] = self._parents[key]
+                if fraction is not None and status == "running":
+                    fields["fraction"] = fraction
+                if state[2]:
+                    fields["detail"] = state[2]
+                self._sink.emit("stage", **fields)

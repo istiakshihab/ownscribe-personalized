@@ -180,12 +180,14 @@ def transcribe(
     default=None,
     help="Override diarization warmup (defaults to config setting).",
 )
+@click.option("--events-fd", type=int, default=None, help="Write JSON progress events to this file descriptor.")
 @click.pass_context
 def warmup(
     ctx: click.Context,
     model: str | None,
     language: str | None,
     with_diarization: bool | None,
+    events_fd: int | None,
 ) -> None:
     """Prefetch MLX Whisper/pyannote models to avoid first-run stalls."""
     config = ctx.obj["config"]
@@ -197,7 +199,18 @@ def warmup(
         config.diarization.enabled = with_diarization
 
     from ownscribe.pipeline import run_warmup
-    run_warmup(config)
+
+    factory = None
+    if events_fd is not None:
+        from ownscribe.events import EventSink
+        from ownscribe.progress import EventProgress
+
+        sink = EventSink(events_fd)
+
+        def factory(**kwargs):
+            return EventProgress(sink, **kwargs)
+
+    run_warmup(config, progress_factory=factory)
 
 
 @cli.command()
@@ -335,3 +348,234 @@ def _remove_targets(targets: list[tuple[str, str]]) -> None:
             click.echo(f"  Removed {label}: {path}")
         else:
             click.echo(f"  {label}: {path} — not found, skipping")
+
+
+# ----------------------------------------------------------------- GUI jobs (docs/engine-protocol.md)
+
+_events_fd = click.option(
+    "--events-fd", type=int, default=None, help="Write JSON progress events to this file descriptor."
+)
+_as_json = click.option("--json", "as_json", is_flag=True, help="Print the result as JSON on stdout.")
+_session_arg = click.argument("session", type=click.Path(exists=True, file_okay=False))
+
+
+def _run_job(command: str, session: str | None, events_fd: int | None, as_json: bool, fn) -> None:
+    """Run a job with events and a JSON result; exit 0 ok, 1 failed, 2 partial, 130 cancelled."""
+    import signal
+    import sys
+
+    from ownscribe.events import EventSink
+    from ownscribe.jobs import JobError, dumps
+
+    sink = EventSink(events_fd)
+
+    def _cancel(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _cancel)
+    sink.emit("job", command=command, session=session, status="started")
+    try:
+        result = fn(sink)
+    except JobError as exc:
+        sink.emit("error", code=exc.code, message=exc.message, **({"stage": exc.stage} if exc.stage else {}))
+        sink.emit("job", command=command, session=session, status="failed")
+        sink.close()
+        click.echo(f"Error: {exc.message}", err=True)
+        if as_json:
+            click.echo(dumps({"ok": False, "code": exc.code, "message": exc.message}))
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sink.emit("job", command=command, session=session, status="cancelled")
+        sink.close()
+        sys.exit(130)
+    exit_code = result.pop("exit_code", 0) if isinstance(result, dict) else 0
+    final_session = result.get("session", session) if isinstance(result, dict) else session
+    sink.emit("job", command=command, session=final_session, status="done")
+    sink.close()
+    if as_json:
+        click.echo(dumps(result))
+    sys.exit(exit_code)
+
+
+def _job_config(ctx: click.Context) -> Config:
+    from ownscribe.jobs import prepare_environment
+
+    config = ctx.obj["config"]
+    prepare_environment(config)
+    return config
+
+
+@cli.group("session")
+def session_group() -> None:
+    """Create session folders for a GUI recording."""
+
+
+@session_group.command("new")
+@click.option("--output-dir", default=None, help="Parent folder (default: [output] dir).")
+@_as_json
+@click.pass_context
+def session_new(ctx: click.Context, output_dir: str | None, as_json: bool) -> None:
+    """Create a session folder; pass its path to `ownscribe-audio capture --session`."""
+    from pathlib import Path
+
+    from ownscribe import session as sessions
+    from ownscribe.jobs import dumps
+
+    config = ctx.obj["config"]
+    base = Path(output_dir).expanduser() if output_dir else config.output.resolved_dir
+    path = sessions.new_session(base)
+    click.echo(dumps({"id": path.name, "path": str(path)}) if as_json else str(path))
+
+
+@cli.command("process")
+@_session_arg
+@click.option("--template", default=None, help="Summary template (meeting, lecture, brief, or custom).")
+@click.option("--diarize/--no-diarize", default=None, help="Override [diarization] enabled.")
+@click.option("--summarize/--no-summarize", default=None, help="Override [summarization] enabled.")
+@click.option("--language", default=None, help="Transcription language code.")
+@click.option("--min-speakers", type=int, default=None)
+@click.option("--max-speakers", type=int, default=None)
+@_events_fd
+@_as_json
+@click.pass_context
+def process_cmd(ctx, session, template, diarize, summarize, language, min_speakers, max_speakers, events_fd, as_json):
+    """Transcribe, diarize and summarize a session's recording.wav."""
+    from pathlib import Path
+
+    from ownscribe import jobs
+
+    config = _job_config(ctx)
+    _run_job("process", session, events_fd, as_json, lambda sink: jobs.process(
+        config, Path(session), sink=sink, template=template, diarize=diarize, summarize=summarize,
+        language=language, min_speakers=min_speakers, max_speakers=max_speakers))
+
+
+@cli.command("speakers")
+@_session_arg
+@click.option(
+    "--set", "assignments", multiple=True, metavar="LABEL=NAME", help="Name a speaker, e.g. SPEAKER_00=Alice."
+)
+@click.option("--suggest", is_flag=True, help="Ask Claude to suggest each speaker's role.")
+@click.option("--resummarize", is_flag=True, help="Summarize again with the names instead of substituting them.")
+@_events_fd
+@_as_json
+@click.pass_context
+def speakers_cmd(ctx, session, assignments, suggest, resummarize, events_fd, as_json):
+    """Name speakers and re-render the transcript and summary."""
+    from pathlib import Path
+
+    from ownscribe import jobs
+
+    names = {}
+    for item in assignments:
+        label, sep, name = item.partition("=")
+        if not sep:
+            raise click.BadParameter(f"{item!r} is not LABEL=NAME", param_hint="--set")
+        names[label.strip()] = name
+    config = _job_config(ctx)
+
+    def run(sink):
+        result: dict = {"session": session}
+        if suggest:
+            result["roles"] = jobs.suggest_roles(config, Path(session), sink=sink)
+        if names or resummarize:
+            result.update(jobs.set_speaker_names(config, Path(session), names, sink=sink, resummarize=resummarize))
+        return result
+
+    _run_job("speakers", session, events_fd, as_json, run)
+
+
+@cli.command("resummarize")
+@_session_arg
+@click.option("--template", required=True, help="Summary template (meeting, lecture, brief, or custom).")
+@_events_fd
+@_as_json
+@click.pass_context
+def resummarize_cmd(ctx, session, template, events_fd, as_json):
+    """Summarize a session again with another template."""
+    from pathlib import Path
+
+    from ownscribe import jobs
+
+    config = _job_config(ctx)
+    _run_job("resummarize", session, events_fd, as_json,
+             lambda sink: jobs.resummarize(config, Path(session), template, sink=sink))
+
+
+@cli.command("file")
+@_session_arg
+@click.option("--preview", "mode", flag_value="preview", help="Draft the vault note and show it.")
+@click.option("--write", "mode", flag_value="write", help="Write the previewed note into the vault.")
+@click.option("--edits", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="JSON file with title/category/tags/body_markdown overrides for --write.")
+@_events_fd
+@_as_json
+@click.pass_context
+def file_cmd(ctx, session, mode, edits, events_fd, as_json):
+    """File a session into the Obsidian vault: --preview first, then --write."""
+    import json as _json
+    from pathlib import Path
+
+    from ownscribe import jobs
+
+    if mode is None:
+        raise click.UsageError("Pass --preview or --write.")
+    config = _job_config(ctx)
+    overrides = _json.loads(Path(edits).read_text()) if edits else None
+    if mode == "preview":
+        _run_job("file", session, events_fd, as_json,
+                 lambda sink: jobs.vault_preview(config, Path(session), sink=sink))
+    else:
+        _run_job("file", session, events_fd, as_json,
+                 lambda sink: jobs.vault_write(config, Path(session), edits=overrides, sink=sink))
+
+
+@cli.command("sessions")
+@click.option("--output-dir", default=None, help="Folder to list (default: [output] dir).")
+@_as_json
+@click.pass_context
+def sessions_cmd(ctx, output_dir, as_json):
+    """List recordings and their processing status."""
+    from pathlib import Path
+
+    from ownscribe import session as sessions
+    from ownscribe.jobs import dumps
+
+    config = ctx.obj["config"]
+    found = sessions.list_sessions(Path(output_dir).expanduser() if output_dir else config.output.resolved_dir)
+    if as_json:
+        click.echo(dumps({"sessions": found}))
+        return
+    for s in found:
+        stages = " ".join(f"{k}={v}" for k, v in s["stages"].items())
+        click.echo(f"{s['id']}  {s.get('title') or '(untitled)'}  {stages}")
+
+
+@cli.command("templates")
+@_as_json
+@click.pass_context
+def templates_cmd(ctx, as_json):
+    """List summary templates (built-in and custom)."""
+    from ownscribe import jobs
+
+    found = jobs.list_templates(ctx.obj["config"])
+    click.echo(jobs.dumps({"templates": found}) if as_json else "\n".join(f"{t['name']} ({t['kind']})" for t in found))
+
+
+@cli.command("doctor")
+@_as_json
+@click.pass_context
+def doctor_cmd(ctx, as_json):
+    """Check tools, tokens, models and disk space a recording needs."""
+    import sys
+
+    from ownscribe import jobs
+
+    report = jobs.doctor(_job_config(ctx))
+    if as_json:
+        click.echo(jobs.dumps(report))
+    else:
+        for name, check in report["checks"].items():
+            details = ", ".join(f"{k}={v}" for k, v in check.items() if k != "ok")
+            click.echo(f"{'ok ' if check['ok'] else 'NO '} {name}: {details}")
+    sys.exit(0 if report["ok"] else 1)

@@ -178,6 +178,9 @@ class CoreAudioRecorder(AudioRecorder):
 
         self._process = subprocess.Popen(
             cmd,
+            # The helper must never share the terminal's stdin: the recording loop reads the
+            # 'm' mute key from it, and session-mode helpers treat stdin as their command channel.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             process_group=0,
