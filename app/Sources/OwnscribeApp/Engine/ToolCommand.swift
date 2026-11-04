@@ -33,6 +33,10 @@ struct ToolCommand: Equatable, Sendable {
         env["PATH"] = searchPath.joined(separator: ":")
         env["PYTHONUNBUFFERED"] = "1"
         env["NO_COLOR"] = "1"
+        // The backend prefers HF_TOKEN over config.toml. An app launched from a terminal inherits the
+        // shell's HF_TOKEN, so drop it when a token is saved (Settings ▸ Hugging Face): what's saved
+        // there is what jobs use, however the app was opened.
+        if HFConfig.load() != nil { env["HF_TOKEN"] = nil }
         return env
     }
 

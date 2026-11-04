@@ -1,7 +1,8 @@
 # ownscribe recorder (macOS app)
 
-A native SwiftUI front end for ownscribe with Liquid Glass materials (macOS 26+). It drives the
-backend exactly as [docs/engine-protocol.md](../docs/engine-protocol.md) describes:
+A native SwiftUI front end for ownscribe (macOS 26+) with a standard macOS look: a frosted window
+background (as in System Settings) behind solid grouped sections, and native menus, buttons and sliders.
+The window opens sized to the screen and only the transcript and summary scroll. It drives the backend exactly as [docs/engine-protocol.md](../docs/engine-protocol.md) describes:
 
 - **Recording:** `ownscribe session new --json` makes the session folder, then the app spawns
   `ownscribe-audio capture --session DIR --control stdio --mic --mic-auto|--mic-device UID --exclude-bundle com.ownscribe.app`,
@@ -29,7 +30,9 @@ The first recording asks for **Microphone** and **System Audio Recording** acces
 
 ## Settings
 
-ownscribe ▸ Settings… holds the two commands the app runs:
+ownscribe ▸ Settings… has two tabs.
+
+**Backend** holds the two commands the app runs:
 
 | setting | default |
 |---|---|
@@ -43,14 +46,25 @@ too, since a GUI app gets launchd's minimal PATH. Extra words are passed through
 **Use mock engine** points both at `scripts/mock_engine.py --speed 5`, which fakes capture and
 processing with synthetic data (no permissions, models or audio needed). **Use defaults** switches back.
 
+**Hugging Face** is where the diarization token goes. Paste it and press Save: it's written to
+`[diarization] hf_token` in `~/.config/ownscribe/config.toml` (only that line changes; the file is set to
+mode 600), so the terminal `ownscribe` uses it too. **Test token** checks it against huggingface.co the
+same way diarization does: that it's valid, and that it can download the gated
+`pyannote/speaker-diarization-community-1` (a 403 means the account hasn't accepted the model's terms).
+
+The backend prefers an `HF_TOKEN` environment variable over config.toml, and an app opened from a
+terminal inherits the shell's. So while a token is saved in config.toml, the app removes `HF_TOKEN` from
+the jobs it starts: the saved token is what diarization uses, however the app was opened.
+
 ## Layout
 
 - `Sources/OwnscribeApp/Engine/` — `ChildProcess` (posix_spawn with an extra fd 3 for job events),
-  `HelperConnection`, `JobProcess`, one-shot `Tools` (listings, `session new`, `doctor`, `templates`).
+  `HelperConnection`, `JobProcess`, one-shot `Tools` (listings, `session new`, `doctor`, `templates`),
+  `HFConfig` (the token in config.toml, and the token test).
 - `Model/` — `RecorderModel` (helper lifecycle, mixer, meters, mic, notices), `PipelineModel`
   (jobs, stages, transcript, speakers, summary), `LevelHistory` (the last 60 s, averaged into fixed
   0.25 s buckets so the past never reshapes), `AppModel` (wiring, doctor, banners).
-- `Views/` — title bar (toolbar), signal chart, mixer strips, pickers, after-recording panel.
+- `Views/` — title bar (toolbar), signal chart, mixer strips, pickers, after-recording panel, Settings.
 
 Notes:
 

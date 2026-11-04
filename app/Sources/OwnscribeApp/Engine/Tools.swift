@@ -153,7 +153,7 @@ enum Tools {
                 report.problems.append(.init(id: "ffmpeg", message: "ffmpeg is missing, so transcription can't run. Install it with Homebrew or set [paths] ffmpeg in ~/.config/ownscribe/config.toml.", isWarning: false))
             }
             if let c = check("hf_token"), c.bool("ok") == false {
-                report.problems.append(.init(id: "hf_token", message: "No Hugging Face token, so diarization will be skipped. Set [diarization] hf_token in ~/.config/ownscribe/config.toml.", isWarning: true))
+                report.problems.append(.init(id: "hf_token", message: "No Hugging Face token, so diarization will be skipped. Add one in Settings → Hugging Face.", isWarning: true))
             }
             if let c = check("claude"), c.bool("ok") == false {
                 report.problems.append(.init(id: "claude", message: "The claude CLI isn't found (needed for vault filing): \(c.string("message") ?? "set [paths] claude").", isWarning: true))

@@ -10,6 +10,7 @@ enum Prefs {
     static let diarize = "diarize"
     static let summarize = "summarize"
     static let template = "template"
+    static let settingsTab = "settingsTab"   // backend | huggingface
 
     static let defaultOwnscribe = "uv run --project ~/Codes/ownscribe ownscribe"
     static let defaultHelper = "~/Codes/ownscribe/bin/ownscribe-audio"

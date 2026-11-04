@@ -21,7 +21,6 @@ struct MixerPanel: View {
                 } label: {
                     Label("Add source", systemImage: "plus").font(.system(size: 12, weight: .semibold))
                 }
-                .buttonStyle(.glass)
                 .controlSize(.small)
                 .disabled(recorder.phase == .starting || recorder.phase == .stopping)
                 .popover(isPresented: $showAdd, arrowEdge: .bottom) {
@@ -56,7 +55,7 @@ struct MixerPanel: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .glassPanel()
+        .panel()
     }
 
     /// Roomy for two, tighter for three, compact from four.
@@ -208,18 +207,14 @@ struct MuteButton: View {
     let action: () -> Void
 
     var body: some View {
-        let size: CGFloat = compact ? 26 : 30
-        let icon = Image(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-            .font(.system(size: compact ? 11 : 13, weight: .semibold))
-            .frame(width: size, height: size)
-            .contentShape(Circle())
-        // Muted is painted solid red (not an accent tint), so it stays red when the window isn't key.
+        // A plain bordered button; muted shows a red crossed-out speaker (red, not the accent colour,
+        // so it stays visible when the window isn't key).
         Button(action: action) {
-            icon.foregroundStyle(muted ? Color.white : Theme.ink)
-                .background { if muted { Circle().fill(Theme.rec) } }
+            Image(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .foregroundStyle(muted ? Theme.rec : Theme.ink)
+                .frame(width: compact ? 14 : 18)
         }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Circle())
+        .controlSize(compact ? .small : .regular)
         .help(muted ? "Unmute \(label)" : "Mute \(label)")
         .accessibilityLabel(muted ? "Unmute \(label)" : "Mute \(label)")
     }
@@ -278,7 +273,7 @@ struct ScaleView: View {
     }
 }
 
-/// Vertical fader, −∞ (−60) to +6 dB, with a glass thumb. Double-click returns it to 0 dB.
+/// Vertical fader, −∞ (−60) to +6 dB, drawn like a system slider. Double-click returns it to 0 dB.
 struct VerticalFader: View {
     @Binding var value: Double
     var onEnd: (Double) -> Void
@@ -288,26 +283,25 @@ struct VerticalFader: View {
     var body: some View {
         GeometryReader { geo in
             let h = geo.size.height
-            let thumbH: CGFloat = 20
+            let thumbH: CGFloat = 14
             let travel = h - thumbH
             let frac = (value - Self.range.lowerBound) / (Self.range.upperBound - Self.range.lowerBound)
             let thumbY = travel * (1 - frac)
             ZStack(alignment: .top) {
                 Capsule().fill(Theme.meterBg)
-                    .overlay(Capsule().strokeBorder(Theme.wellLine))
-                    .frame(width: 6)
+                    .frame(width: 4)
                     .frame(maxHeight: .infinity)
-                Capsule().fill(Theme.ink2)
-                    .frame(width: 6, height: max(0, h - thumbY - thumbH / 2))
+                Capsule().fill(Color.accentColor)
+                    .frame(width: 4, height: max(0, h - thumbY - thumbH / 2))
                     .frame(maxHeight: .infinity, alignment: .bottom)
                 // 0 dB tick
                 Rectangle().fill(Theme.ink3).frame(width: 12, height: 1)
                     .offset(y: travel * (1 - (0 - Self.range.lowerBound) / (Self.range.upperBound - Self.range.lowerBound)) + thumbH / 2)
                 Capsule()
-                    .fill(.clear)
-                    .frame(width: 30, height: thumbH)
-                    .glassEffect(.regular.interactive(), in: Capsule())
-                    .overlay(Capsule().fill(Theme.ink2).frame(width: 14, height: 2))
+                    .fill(Color(light: 0xFFFFFF, dark: 0xD2D2D2))
+                    .overlay(Capsule().strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+                    .frame(width: 24, height: thumbH)
                     .offset(y: thumbY)
             }
             .frame(maxWidth: .infinity)

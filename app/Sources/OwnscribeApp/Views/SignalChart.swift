@@ -17,7 +17,7 @@ struct SignalPanel: View {
                 .frame(minHeight: 180, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .glassPanel()
+        .panel()
     }
 
     private var subtitle: String {
@@ -48,7 +48,9 @@ struct SignalChart: View {
                         tip.view
                             .fixedSize()
                             .padding(.horizontal, 10).padding(.vertical, 8)
-                            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .background(Theme.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.wellLine, lineWidth: 0.5))
+                            .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
                             .alignmentGuide(.leading) { d in
                                 let left = tip.x + 14 + d.width > geo.size.width ? tip.x - d.width - 14 : tip.x + 14
                                 return -max(0, left)
@@ -142,7 +144,7 @@ struct SignalChart: View {
     }
 
     private func dot(_ ctx: inout GraphicsContext, _ p: CGPoint) {
-        ctx.fill(Path(ellipseIn: CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12)), with: .color(Theme.wallBase))
+        ctx.fill(Path(ellipseIn: CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12)), with: .color(Theme.section))
         ctx.fill(Path(ellipseIn: CGRect(x: p.x - 4, y: p.y - 4, width: 8, height: 8)), with: .color(Theme.ink))
     }
 

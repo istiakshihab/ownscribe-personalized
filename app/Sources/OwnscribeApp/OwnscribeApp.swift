@@ -19,7 +19,16 @@ struct OwnscribeApp: App {
         Window("ownscribe", id: "main") {
             ContentView(app: model)
         }
-        .defaultSize(width: 1000, height: 960)
+        // First launch: as wide as the layout likes and as tall as the screen allows, so nothing
+        // needs a scroll bar. (After that, macOS reopens the window at the size it was left.)
+        .defaultWindowPlacement { content, context in
+            let visible = context.defaultDisplay.visibleRect
+            let width = min(1040, visible.width - 40)
+            let minimum = content.sizeThatFits(.init(width: width, height: nil)).height
+            let height = min(visible.height - 40, max(minimum, 940))
+            return WindowPlacement(size: CGSize(width: width, height: height))
+        }
+        .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {}

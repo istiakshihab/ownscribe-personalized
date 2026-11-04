@@ -86,7 +86,8 @@ final class AppModel {
         var out: [Banner] = []
         if let doctorError { out.append(.init(id: "doctor-error", text: doctorError, kind: .error, action: .settings)) }
         for p in doctor?.problems ?? [] where !dismissedProblems.contains(p.id) {
-            out.append(.init(id: "doctor-\(p.id)", text: p.message, kind: p.isWarning ? .warning : .error, action: .recheck))
+            out.append(.init(id: "doctor-\(p.id)", text: p.message, kind: p.isWarning ? .warning : .error,
+                             action: p.id == "hf_token" ? .huggingFace : .recheck))
         }
         if let e = recorder.lastError {
             out.append(.init(id: "recorder", text: e, kind: .error, action: recorder.recoverablePath != nil ? .recover : .log))
@@ -137,7 +138,7 @@ final class AppModel {
 struct Banner: Identifiable, Equatable {
     enum Kind { case warning, error }
     enum Action: Equatable {
-        case settings, recheck, log, recover, dismiss
+        case settings, huggingFace, recheck, log, recover, dismiss
         case privacy(String)
     }
 

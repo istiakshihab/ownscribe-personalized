@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Colours from the approved mockup, each with its dark-mode counterpart.
+/// Standard macOS colours (they follow light/dark mode and accessibility settings), plus the data
+/// colours from the approved mockup for sources and meter zones.
 enum Theme {
     static let seriesSys = Color(light: 0x2A78D6, dark: 0x3987E5)
     static let seriesMic = Color(light: 0xEB6834, dark: 0xD95926)
@@ -13,25 +14,23 @@ enum Theme {
     static let good = Color(hex: 0x0CA30C)
     static let warn = Color(hex: 0xFAB219)
     static let crit = Color(hex: 0xD03B3B)
-    static let rec = Color(hex: 0xD03B3B)
+    static let rec = Color(nsColor: .systemRed)
 
-    static let ink = Color(light: 0x10201D, dark: 0xEEF3F1)
-    static let ink2 = Color(light: 0x3D4E4A, dark: 0xB8C5C1)
-    static let ink3 = Color(light: 0x66756F, dark: 0x85938F)
-    static let grid = Color(light: (0x10201D, 0.09), dark: (0xEEF3F1, 0.08))
-    static let wellLine = Color(light: (0x10201D, 0.08), dark: (0xEEF3F1, 0.07))
-    static let well = Color(light: (0xFFFFFF, 0.5), dark: (0x080C0E, 0.42))
-    static let control = Color(light: (0xFFFFFF, 0.55), dark: (0xFFFFFF, 0.08))
-    static let meterBg = Color(light: (0x10201D, 0.07), dark: (0x000000, 0.32))
-    static let meterGap = Color(light: (0xFFFFFF, 0.6), dark: (0x0E1416, 0.8))
+    static let ink = Color(nsColor: .labelColor)
+    static let ink2 = Color(nsColor: .secondaryLabelColor)
+    static let ink3 = Color(nsColor: .tertiaryLabelColor)
+    static let grid = Color(nsColor: .separatorColor)
+    static let wellLine = Color(nsColor: .separatorColor)
+    /// Section background: opaque, like the grouped boxes in System Settings' content area, so the
+    /// frosted window shows only around the sections.
+    static let section = Color(light: 0xFFFFFF, dark: 0x2B2B2D)
+    /// Cards inside a section (pipeline stages): a slightly inset shade of the section.
+    static let control = Color(light: 0xF5F5F7, dark: 0x232325)
+    static let well = Color(nsColor: .textBackgroundColor)
+    static let background = Color(nsColor: .windowBackgroundColor)
+    static let meterBg = Color(light: (0x000000, 0.07), dark: (0x000000, 0.35))
+    static let meterGap = Color(light: (0xFFFFFF, 0.75), dark: (0x2B2B2D, 0.9))
     static let zoneDim = 0.22
-
-    // Wallpaper behind the glass: glass needs colour to refract.
-    static let wallBase = Color(light: 0xDDE6DF, dark: 0x0E1618)
-    static let wallA = Color(light: 0x9FD3C7, dark: 0x14544D)
-    static let wallB = Color(light: 0xF5C79C, dark: 0x6A3A1D)
-    static let wallC = Color(light: 0xC4DBA9, dark: 0x22402A)
-    static let wallD = Color(light: 0xF0A493, dark: 0x5A2531)
 
     static func color(for strip: RecorderModel.Strip) -> Color { series[strip.colorIndex % series.count] }
 
@@ -70,49 +69,18 @@ extension NSColor {
     }
 }
 
-/// Soft colour fields behind the window's glass panels.
-struct Wallpaper: View {
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width, h = geo.size.height
-            ZStack {
-                Theme.wallBase
-                blob(Theme.wallA, at: CGPoint(x: 0.12 * w, y: 0.18 * h), size: CGSize(width: 0.84 * w, height: 1.04 * h))
-                blob(Theme.wallB, at: CGPoint(x: 0.88 * w, y: 0.12 * h), size: CGSize(width: 0.76 * w, height: 0.92 * h))
-                blob(Theme.wallD, at: CGPoint(x: 0.78 * w, y: 0.88 * h), size: CGSize(width: 0.92 * w, height: 1.0 * h))
-                blob(Theme.wallC, at: CGPoint(x: 0.20 * w, y: 0.92 * h), size: CGSize(width: 0.80 * w, height: 0.88 * h))
-            }
-        }
-    }
-
-    /// CSS `radial-gradient(rx ry at x y, color 0%, transparent 70%)`.
-    private func blob(_ color: Color, at center: CGPoint, size: CGSize) -> some View {
-        let r = max(size.width, size.height) / 2
-        return RadialGradient(colors: [color, color.opacity(0)], center: .center, startRadius: 0, endRadius: r * 0.7)
-            .frame(width: r * 2, height: r * 2)
-            .scaleEffect(x: size.width / (r * 2), y: size.height / (r * 2))
-            .position(center)
-    }
-}
-
-/// The mockup's panel: a Liquid Glass slab with a hairline rim.
-struct GlassPanel: ViewModifier {
-    var radius: CGFloat = 20
-
-    func body(content: Content) -> some View {
-        content
-            .padding(.init(top: 14, leading: 16, bottom: 16, trailing: 16))
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-    }
-}
-
 extension View {
-    func glassPanel(radius: CGFloat = 20) -> some View { modifier(GlassPanel(radius: radius)) }
+    /// A grouped section: subtle fill and hairline border, as in System Settings.
+    func panel(radius: CGFloat = 10) -> some View {
+        padding(.init(top: 12, leading: 14, bottom: 14, trailing: 14))
+            .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Theme.section))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Theme.wellLine, lineWidth: 0.5))
+    }
 
-    /// The mockup's inset "well" (stage cards, text fields).
-    func well(radius: CGFloat = 16, fill: Color = Theme.control) -> some View {
+    /// A card inside a section (pipeline stages).
+    func well(radius: CGFloat = 8, fill: Color = Theme.control) -> some View {
         background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(fill))
-            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Theme.wellLine, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Theme.wellLine, lineWidth: 0.5))
     }
 }
 
@@ -120,7 +88,7 @@ extension View {
 struct PanelTitle: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink2).kerning(0.24)
+        Text(text).font(.headline)
     }
 }
 

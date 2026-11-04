@@ -17,7 +17,7 @@ struct PipelinePanel: View {
                 Spacer()
                 if pipeline.isRunning {
                     Button("Cancel", role: .cancel) { pipeline.cancel() }
-                        .buttonStyle(.glass).controlSize(.small)
+                        .controlSize(.small)
                 } else {
                     Text("Runs on this Mac when you press Stop").font(.system(size: 11)).foregroundStyle(Theme.ink3)
                 }
@@ -29,8 +29,10 @@ struct PipelinePanel: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             results
+                .frame(maxHeight: .infinity, alignment: .top)
         }
-        .glassPanel()
+        .frame(maxHeight: .infinity, alignment: .top)
+        .panel()
         .onChange(of: tab) { _, new in if new == .summary { pipeline.summaryUnseen = false } }
         .onChange(of: pipeline.summaryUnseen) { _, unseen in if unseen && tab == .summary { pipeline.summaryUnseen = false } }
     }
@@ -71,6 +73,9 @@ struct PipelinePanel: View {
             }
             .opacity(pipeline.diarizationOff ? 0.45 : 1)
             Text(pipeline.diarizationFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(4).help(pipeline.diarizationFoot)
+            if pipeline.diarization.status == .failed, pipeline.diarization.message?.contains("Hugging Face") == true {
+                HuggingFaceSettingsButton()
+            }
         }
     }
 
@@ -129,7 +134,7 @@ struct PipelinePanel: View {
                     } label: {
                         Image(systemName: "folder")
                     }
-                    .buttonStyle(.glass).controlSize(.small)
+                    .buttonStyle(.borderless)
                     .help("Show in Finder")
                 }
             }
@@ -139,7 +144,7 @@ struct PipelinePanel: View {
                 case .summary: summaryPane
                 }
             }
-            .frame(minHeight: 120, alignment: .topLeading)
+            .frame(minHeight: 110, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -167,7 +172,7 @@ struct PipelinePanel: View {
                     SummaryView(title: pipeline.summary?.title, markdown: text)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 320)
+                .frame(maxHeight: .infinity)
             } else {
                 Text(pipeline.summarizationOff ? "Summarization is off for this recording." :
                     pipeline.summarization.status == .failed ? (pipeline.summarization.message ?? "Summarization failed.") :
@@ -198,7 +203,7 @@ struct StageCard<Accessory: View, Content: View>: View {
         }
         .padding(.init(top: 12, leading: 14, bottom: 14, trailing: 14))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .well(radius: 16)
+        .well()
         .accessibilityElement(children: .contain)
     }
 }
@@ -232,30 +237,20 @@ struct StatusIcon: View {
     }
 }
 
+/// The system's linear progress bar; indeterminate when there's no fraction.
 struct ProgressBar: View {
     let fraction: Double?
     var indeterminate = false
-    @ViewState private var phase = false
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Theme.meterBg)
-                if indeterminate {
-                    Capsule().fill(Theme.ink2)
-                        .frame(width: geo.size.width * 0.35)
-                        .offset(x: phase ? geo.size.width : -geo.size.width * 0.35)
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false)) { phase = true }
-                        }
-                } else {
-                    Capsule().fill(Theme.ink2).frame(width: geo.size.width * CGFloat(min(max(fraction ?? 0, 0), 1)))
-                        .animation(.linear(duration: 0.2), value: fraction)
-                }
+        Group {
+            if indeterminate {
+                ProgressView().progressViewStyle(.linear)
+            } else {
+                ProgressView(value: min(max(fraction ?? 0, 0), 1)).progressViewStyle(.linear)
             }
-            .clipShape(Capsule())
         }
-        .frame(height: 6)
+        .controlSize(.small)
     }
 }
 
@@ -276,11 +271,8 @@ struct SpeakerFields: View {
                                 get: { pipeline.drafts[label] ?? pipeline.names[label] ?? "" },
                                 set: { pipeline.setDraft(label, $0) }
                             ))
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 12))
-                            .padding(.horizontal, 9).padding(.vertical, 4)
-                            .frame(width: 120)
-                            .well(radius: 9, fill: Theme.well)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 130)
                             .onSubmit { pipeline.commitNames() }
                             .accessibilityLabel("Name for \(label)")
                         }
@@ -330,7 +322,7 @@ struct TranscriptList: View {
                 }
                 .padding(.trailing, 4)
             }
-            .frame(maxHeight: 250)
+            .frame(maxHeight: .infinity)
             .onChange(of: pipeline.segments.count) { _, _ in
                 if pipeline.isProcessing, let last = pipeline.segments.last {
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -431,5 +423,18 @@ struct SummaryView: View {
         }
         flush()
         return blocks
+    }
+}
+
+/// Opens Settings on the Hugging Face tab.
+struct HuggingFaceSettingsButton: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Hugging Face Settings…") {
+            Prefs.defaults.set("huggingface", forKey: Prefs.settingsTab)
+            openSettings()
+        }
+        .controlSize(.small)
     }
 }

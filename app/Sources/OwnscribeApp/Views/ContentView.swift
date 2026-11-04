@@ -5,30 +5,32 @@ struct ContentView: View {
     let app: AppModel
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                if !app.banners.isEmpty { BannerStack(app: app) }
-                HStack(alignment: .top, spacing: 16) {
-                    SignalPanel(recorder: app.recorder)
-                        .frame(minWidth: 320)
-                    MixerPanel(recorder: app.recorder)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-                .fixedSize(horizontal: false, vertical: true)
-                HStack(alignment: .top, spacing: 16) {
-                    MicPicker(recorder: app.recorder)
-                    SaveLocationPicker(app: app)
-                }
-                PipelinePanel(app: app)
+        // No page scrolling: the fixed parts sit on top and the results area (transcript, summary)
+        // takes whatever height is left, scrolling inside itself.
+        VStack(spacing: 14) {
+            if !app.banners.isEmpty { BannerStack(app: app) }
+            HStack(alignment: .top, spacing: 14) {
+                SignalPanel(recorder: app.recorder)
+                    .frame(minWidth: 320)
+                MixerPanel(recorder: app.recorder)
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, 20)
-            .frame(maxWidth: 1100)
-            .frame(maxWidth: .infinity)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 16) {
+                MicPicker(recorder: app.recorder)
+                SaveLocationPicker(app: app)
+            }
+            .padding(.horizontal, 4)
+            PipelinePanel(app: app)
+                .frame(maxHeight: .infinity)
         }
-        .scrollEdgeEffectStyle(.soft, for: .top)
-        .background { Wallpaper().ignoresSafeArea() }
+        .padding(.horizontal, 20)
+        .padding(.top, 6)
+        .padding(.bottom, 18)
+        .frame(maxWidth: 1100, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity)
+        // Frosted window background: the desktop shows through, blurred, as in System Settings.
+        .containerBackground(for: .window) { FrostedBackground() }
         .navigationTitle("ownscribe")
         .navigationSubtitle(app.statusLine)
         .toolbar {
@@ -39,9 +41,8 @@ struct ContentView: View {
             ToolbarItem(placement: .primaryAction) {
                 RecordButton(app: app)
             }
-            .sharedBackgroundVisibility(.hidden)
         }
-        .frame(minWidth: 880, minHeight: 640)
+        .frame(minWidth: 880)
         .task { await app.launch() }
     }
 }
@@ -78,28 +79,21 @@ struct RecordButton: View {
         let recorder = app.recorder
         let recording = recorder.phase == .recording
         let busy = recorder.phase == .starting || recorder.phase == .stopping || (recorder.phase == .idle && app.pipeline.isProcessing)
-        let label = HStack(spacing: 8) {
-            RoundedRectangle(cornerRadius: recording ? 3 : 6, style: .continuous)
-                .fill(recording ? Color.white : Theme.rec)
-                .frame(width: recording ? 10 : 12, height: recording ? 10 : 12)
-            Text(title).font(.system(size: 13, weight: .semibold))
+        Group {
+            if recording {
+                Button { recorder.toggle() } label: { Label(title, systemImage: "stop.fill") }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.rec)
+            } else {
+                Button { recorder.toggle() } label: {
+                    Label { Text(title) } icon: { Image(systemName: "record.circle.fill").foregroundStyle(Theme.rec) }
+                }
+            }
         }
-        .padding(.leading, 4).padding(.trailing, 6)
-        // While recording the button is solid red (like the mockup), not an accent tint that
-        // turns grey whenever the window isn't key.
-        Button { recorder.toggle() } label: {
-            label
-                .foregroundStyle(recording ? Color.white : Theme.ink)
-                .padding(.vertical, 7).padding(.horizontal, 8)
-                .background { if recording { Capsule().fill(Theme.rec) } }
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Capsule())
+        .labelStyle(.titleAndIcon)
         .disabled(busy)
         .keyboardShortcut("r", modifiers: .command)
         .help(recording ? "Stop and save (⌘R)" : "Start recording (⌘R)")
-        .animation(.snappy, value: recording)
     }
 
     private var title: String {
@@ -135,9 +129,11 @@ struct BannerStack: View {
                     .buttonStyle(.plain).foregroundStyle(Theme.ink3)
                     .help("Dismiss")
                 }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .glassEffect(.regular.tint((banner.kind == .error ? Theme.crit : Theme.warn).opacity(0.12)),
-                             in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background((banner.kind == .error ? Theme.crit : Theme.warn).opacity(0.12),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder((banner.kind == .error ? Theme.crit : Theme.warn).opacity(0.35), lineWidth: 0.5))
             }
         }
     }
@@ -145,14 +141,20 @@ struct BannerStack: View {
     @ViewBuilder private func actionButton(_ banner: Banner) -> some View {
         switch banner.action {
         case .settings:
-            Button("Settings…") { openSettings() }.buttonStyle(.glass).controlSize(.small)
+            Button("Settings…") { openSettings() }.controlSize(.small)
+        case .huggingFace:
+            Button("Hugging Face Settings…") {
+                Prefs.defaults.set("huggingface", forKey: Prefs.settingsTab)
+                openSettings()
+            }
+            .controlSize(.small)
         case .recheck:
             Button(app.checking ? "Checking…" : "Check again") { Task { await app.refreshDoctor() } }
-                .buttonStyle(.glass).controlSize(.small).disabled(app.checking)
+                .controlSize(.small).disabled(app.checking)
         case .log:
-            Button("Open log") { NSWorkspace.shared.open(AppLog.shared.url) }.buttonStyle(.glass).controlSize(.small)
+            Button("Open log") { NSWorkspace.shared.open(AppLog.shared.url) }.controlSize(.small)
         case .recover:
-            Button("Recover recording") { Task { await app.recorder.recover() } }.buttonStyle(.glass).controlSize(.small)
+            Button("Recover recording") { Task { await app.recorder.recover() } }.controlSize(.small)
         case let .privacy(code):
             Button("Open Privacy Settings") {
                 let pane = code.hasPrefix("mic") ? "Privacy_Microphone" : "Privacy_AudioCapture"
@@ -160,59 +162,24 @@ struct BannerStack: View {
                     NSWorkspace.shared.open(url)
                 }
             }
-            .buttonStyle(.glass).controlSize(.small)
+            .controlSize(.small)
         case .dismiss:
             EmptyView()
         }
     }
 }
 
-struct SettingsView: View {
-    let app: AppModel
-    @AppStorage(Prefs.ownscribeCommand) private var ownscribe = Prefs.defaultOwnscribe
-    @AppStorage(Prefs.helperCommand) private var helper = Prefs.defaultHelper
-
-    var body: some View {
-        Form {
-            Section {
-                TextField("ownscribe command", text: $ownscribe, prompt: Text(Prefs.defaultOwnscribe))
-                    .font(.system(size: 12, design: .monospaced))
-                TextField("Capture helper", text: $helper, prompt: Text(Prefs.defaultHelper))
-                    .font(.system(size: 12, design: .monospaced))
-            } header: {
-                Text("Backend")
-            } footer: {
-                Text("Build the helper with `bash swift/build.sh` in the ownscribe repo. Jobs run as `<ownscribe command> process SESSION --events-fd 3`.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            Section {
-                HStack {
-                    Button("Use defaults") {
-                        ownscribe = Prefs.defaultOwnscribe
-                        helper = Prefs.defaultHelper
-                        recheck()
-                    }
-                    Button("Use mock engine") {
-                        ownscribe = Prefs.mockCommand
-                        helper = Prefs.mockCommand
-                        recheck()
-                    }
-                    .help("scripts/mock_engine.py fakes capture and processing with synthetic data")
-                    Spacer()
-                    Button("Check setup") { recheck() }
-                }
-                HStack {
-                    Button("Open log") { NSWorkspace.shared.open(AppLog.shared.url) }
-                    Text(AppLog.shared.url.path.abbreviatingHome).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 560)
-        .padding(.vertical, 8)
+/// AppKit's behind-window material (the frosted, vibrant background of sidebars in System Settings
+/// and Finder). Kept frosted when the window isn't focused too: a recorder mostly sits beside the
+/// app you're in, and standard materials would turn flat grey there.
+struct FrostedBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
     }
 
-    private func recheck() {
-        Task { await app.launch() }
-    }
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }

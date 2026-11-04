@@ -1,36 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// The mockup's select: glyph tile, main and sub line, chevron, on a glass capsule.
-struct SelectButton: View {
-    let systemImage: String
-    let main: String
-    let sub: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 14))
-                    .foregroundStyle(Theme.ink)
-                    .frame(width: 30, height: 30)
-                    .well(radius: 10, fill: Theme.well)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(main).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text(sub).font(.system(size: 11.5)).foregroundStyle(Theme.ink3).lineLimit(1)
-                }
-                Spacer(minLength: 4)
-                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.ink3)
-            }
-            .padding(.vertical, 8).padding(.leading, 10).padding(.trailing, 14)
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-}
-
 struct Hint: View {
     let text: String
     var warning = false
@@ -39,20 +9,18 @@ struct Hint: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if warning {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(Theme.ink, Theme.warn)
+                    .symbolRenderingMode(.multicolor)
                     .font(.system(size: 11))
             }
-            Text(text).font(.system(size: 12)).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
+            Text(text).font(.callout).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.leading, 4)
     }
 }
 
 struct FieldLabel: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink2).padding(.leading, 4)
+        Text(text).font(.headline)
     }
 }
 
@@ -60,41 +28,28 @@ struct FieldLabel: View {
 
 struct MicPicker: View {
     let recorder: RecorderModel
-    @ViewState private var open = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             FieldLabel(text: "Microphone")
-            SelectButton(systemImage: "mic", main: mainText, sub: subText) { open.toggle() }
-                .popover(isPresented: $open, arrowEdge: .top) { menu }
-                .accessibilityLabel("Microphone: \(mainText)")
+            Picker("Microphone", selection: Binding(get: { recorder.micChoice }, set: { recorder.setMic($0) })) {
+                Text("Automatic").tag(MicChoice.auto)
+                if !recorder.devices.isEmpty { Divider() }
+                ForEach(recorder.devices) { device in
+                    Text(device.name).tag(MicChoice.device(device.uid))
+                }
+                if case let .device(uid) = recorder.micChoice, chosenDevice == nil {
+                    Text("\(uid) (not connected)").tag(recorder.micChoice)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            Text(detail).font(.callout).foregroundStyle(Theme.ink3).lineLimit(1)
             let hint = self.hint
             if !hint.text.isEmpty { Hint(text: hint.text, warning: hint.warning) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var menu: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            OptionRow(title: "Automatic", subtitle: "Default input, but skips Bluetooth headsets",
-                      selected: recorder.micChoice == .auto) { pick(.auto) }
-            Divider().padding(.horizontal, 8).padding(.vertical, 4)
-            if recorder.devices.isEmpty {
-                Text("No input devices found").font(.system(size: 12)).foregroundStyle(Theme.ink3).padding(10)
-            }
-            ForEach(recorder.devices) { device in
-                OptionRow(title: device.name, subtitle: Self.describe(device),
-                          selected: recorder.micChoice == .device(device.uid)) { pick(.device(device.uid)) }
-            }
-        }
-        .padding(6)
-        .frame(width: 300)
         .task { await recorder.refreshDevices() }
-    }
-
-    private func pick(_ choice: MicChoice) {
-        recorder.setMic(choice)
-        open = false
     }
 
     static func describe(_ d: DeviceInfo) -> String {
@@ -110,25 +65,18 @@ struct MicPicker: View {
         return nil
     }
 
-    private var mainText: String {
-        switch recorder.micChoice {
-        case .auto: return "Automatic"
-        case let .device(uid): return chosenDevice?.name ?? uid
-        }
-    }
-
-    /// For Automatic: the device it is (or will be) using.
-    private var subText: String {
+    /// For Automatic: the device it is (or will be) using. For a device: its transport and rate.
+    private var detail: String {
         let live = recorder.phase == .recording || recorder.phase == .stopping
         if case .auto = recorder.micChoice {
             if live, let mic = recorder.micInfo {
-                return [mic.name, DeviceInfo.transportLabel(mic.transport), DeviceInfo.rateLabel(mic.rate)]
+                return "Using " + [mic.name, DeviceInfo.transportLabel(mic.transport), DeviceInfo.rateLabel(mic.rate)]
                     .filter { !$0.isEmpty }.joined(separator: " · ")
             }
             if let d = recorder.predictedAutoDevice {
-                return [d.name, d.transportLabel, DeviceInfo.rateLabel(d.sampleRate)].filter { !$0.isEmpty }.joined(separator: " · ")
+                return "Uses " + [d.name, d.transportLabel, DeviceInfo.rateLabel(d.sampleRate)].filter { !$0.isEmpty }.joined(separator: " · ")
             }
-            return "Your default input"
+            return "Your default input, skipping Bluetooth headsets"
         }
         return chosenDevice.map(Self.describe) ?? "Not connected"
     }
@@ -155,7 +103,7 @@ struct MicPicker: View {
             if d.isVirtual {
                 return ("This device carries another app's audio, not your voice. Pick a real microphone to be heard in the recording.", true)
             }
-            return ("Clear \(DeviceInfo.rateLabel(d.sampleRate)) audio.", false)
+            return ("", false)
         }
     }
 }
@@ -165,21 +113,42 @@ struct MicPicker: View {
 struct SaveLocationPicker: View {
     let app: AppModel
     @AppStorage(Prefs.outputDir) private var chosen = ""
-    @ViewState private var open = false
     @ViewState private var recents = Prefs.recents
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             FieldLabel(text: "Save to")
-            SelectButton(systemImage: "folder", main: app.outputDir.abbreviatingHome,
-                         sub: chosen.isEmpty ? "Default · audio, transcript and notes" : "Audio, transcript and notes") { open.toggle() }
-                .popover(isPresented: $open, arrowEdge: .top) { menu }
-                .disabled(app.recorder.phase == .starting)
-                .accessibilityLabel("Save to \(app.outputDir.abbreviatingHome)")
-            Hint(text: "Next file: " + nextPath)
+            HStack(spacing: 8) {
+                Picker("Save to", selection: $chosen) {
+                    Text(app.defaultOutputDir.abbreviatingHome + " (default)").tag("")
+                    let others = folders
+                    if !others.isEmpty { Divider() }
+                    ForEach(others, id: \.self) { Text($0.abbreviatingHome).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                Button("Choose…") { choose() }
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: app.outputDir)])
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .help("Show in Finder")
+            }
+            .disabled(app.recorder.phase == .starting)
+            Text("Next file: " + nextPath)
+                .font(.callout).foregroundStyle(Theme.ink3)
+                .lineLimit(2).truncationMode(.middle)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Recent folders plus the current choice, without the default.
+    private var folders: [String] {
+        var list = recents
+        if !chosen.isEmpty, !list.contains(chosen) { list.insert(chosen, at: 0) }
+        return list.filter { $0 != app.defaultOutputDir }
     }
 
     private var nextPath: String {
@@ -196,32 +165,6 @@ struct SaveLocationPicker: View {
         return f
     }()
 
-    private var menu: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            OptionRow(title: app.defaultOutputDir.abbreviatingHome, subtitle: "Default", selected: chosen.isEmpty) {
-                chosen = ""
-                open = false
-            }
-            ForEach(recents.filter { $0 != app.defaultOutputDir }, id: \.self) { dir in
-                OptionRow(title: dir.abbreviatingHome, subtitle: "Recent", selected: chosen == dir) {
-                    chosen = dir
-                    open = false
-                }
-            }
-            Divider().padding(.horizontal, 8).padding(.vertical, 4)
-            OptionRow(title: "Choose a folder…", selected: false) {
-                open = false
-                choose()
-            }
-            OptionRow(title: "Show in Finder", selected: false) {
-                open = false
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: app.outputDir)])
-            }
-        }
-        .padding(6)
-        .frame(width: 280)
-    }
-
     private func choose() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -231,8 +174,8 @@ struct SaveLocationPicker: View {
         panel.message = "Recordings, transcripts and summaries are saved in a new folder here."
         panel.directoryURL = URL(fileURLWithPath: app.outputDir)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        chosen = url.path
         Prefs.addRecent(url.path)
         recents = Prefs.recents
+        chosen = url.path
     }
 }
