@@ -12,10 +12,19 @@ enum Prefs {
     static let template = "template"
     static let settingsTab = "settingsTab"   // backend | huggingface
 
-    static let defaultOwnscribe = "uv run --project ~/Codes/ownscribe ownscribe"
-    static let defaultHelper = "~/Codes/ownscribe/bin/ownscribe-audio"
+    /// The ownscribe checkout this app was built from: app/build.sh records it in Info.plist, so an
+    /// installed copy (install.sh) finds its own backend. A bundle without it falls back to the
+    /// developer checkout.
+    static let backendRoot: String = {
+        let recorded = Bundle.main.object(forInfoDictionaryKey: "OwnscribeRoot") as? String ?? ""
+        let root = (recorded.isEmpty ? "~/Codes/ownscribe" : recorded).abbreviatingHome
+        return root.contains(where: \.isWhitespace) ? "\"\(root)\"" : root  // ToolCommand splits on spaces
+    }()
+    /// `--frozen`: run what install.sh synced, and never rewrite uv.lock.
+    static let defaultOwnscribe = "uv run --frozen --project \(backendRoot) ownscribe"
+    static let defaultHelper = "\(backendRoot)/bin/ownscribe-audio"
     /// Both halves of the protocol faked by scripts/mock_engine.py, five times faster than real time.
-    static let mockCommand = "/usr/bin/python3 ~/Codes/ownscribe/scripts/mock_engine.py --speed 5"
+    static let mockCommand = "/usr/bin/python3 \(backendRoot)/scripts/mock_engine.py --speed 5"
 
     static var defaults: UserDefaults { .standard }
 

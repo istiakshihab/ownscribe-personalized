@@ -17,6 +17,15 @@ The window opens sized to the screen and only the transcript and summary scroll.
   a template change after a summary runs `ownscribe resummarize DIR --template T`. Cancel sends SIGTERM.
 - **Setup check:** `ownscribe doctor --json` problems show as banners under the title bar.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/istiakshihab/ownscribe-personalized/main/install.sh | bash
+```
+
+[`install.sh`](../install.sh) sets up the tools, the backend and both builds below, and copies the app to
+`/Applications`. `bash install.sh` from a checkout installs that checkout.
+
 ## Build and run
 
 Needs only the Command Line Tools (no Xcode project):
@@ -40,8 +49,11 @@ Earshot ▸ Settings… has two tabs.
 
 | setting | default |
 |---|---|
-| ownscribe command | `uv run --project ~/Codes/ownscribe ownscribe` |
-| Capture helper | `~/Codes/ownscribe/bin/ownscribe-audio` |
+| ownscribe command | `uv run --frozen --project <checkout> ownscribe` |
+| Capture helper | `<checkout>/bin/ownscribe-audio` |
+
+`<checkout>` is the ownscribe folder the app was built from (`app/build.sh` records it in the bundle's
+Info.plist as `OwnscribeRoot`), so a copy in /Applications still finds its backend.
 
 Bare names are looked up in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin`
 too, since a GUI app gets launchd's minimal PATH. Extra words are passed through, e.g.

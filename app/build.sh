@@ -19,6 +19,9 @@ rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 cp "$BIN" "$OUT/Contents/MacOS/Earshot"
 cp "$APP_DIR/Resources/Info.plist" "$OUT/Contents/Info.plist"
+# The checkout this app belongs to: its default backend commands point here (Prefs.backendRoot),
+# wherever the app itself is copied.
+/usr/libexec/PlistBuddy -c "Add :OwnscribeRoot string $(dirname "$APP_DIR")" "$OUT/Contents/Info.plist"
 [ -f "$APP_DIR/Resources/AppIcon.icns" ] && cp "$APP_DIR/Resources/AppIcon.icns" "$OUT/Contents/Resources/"
 
 # Ad-hoc signature: macOS ties the Microphone and System Audio Recording grants to it, so a

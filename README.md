@@ -95,6 +95,27 @@ Works with any app that outputs audio through Core Audio (Zoom, Teams, Meet, etc
 
 ## Installation
 
+### Earshot, the Mac app (one command)
+
+On an Apple silicon Mac with macOS 26 or later, paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/istiakshihab/ownscribe-personalized/main/install.sh | bash
+```
+
+It installs what's missing (Apple's Command Line Tools, [uv](https://docs.astral.sh/uv/), ffmpeg through
+Homebrew), downloads this repo to `~/.local/share/earshot/ownscribe`, sets up the Python backend (about 2 GB the
+first time), builds the capture helper and Earshot, and puts `Earshot.app` in `/Applications`. Everything is built
+on your Mac, so macOS doesn't block it as an unsigned download. Run the same command again to update;
+`… | bash -s -- --uninstall` removes the app and the downloaded source (it asks first, and keeps recordings,
+config and models). From a checkout, `bash install.sh` builds and installs that checkout instead. See
+`bash install.sh --help` for options.
+
+After installing, add a Hugging Face token in Earshot ▸ Settings ▸ Hugging Face so it can tell speakers apart
+(see [Speaker Diarization](#speaker-diarization)).
+
+### The command-line tool
+
 This fork is installed from source with a plain virtualenv — no `uv` involved.
 
 ```bash
