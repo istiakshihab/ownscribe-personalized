@@ -553,6 +553,25 @@ def run_summarize(config: Config, transcript_file: str) -> None:
     click.echo(f"Summary saved to {summary_path}")
 
 
+def _run_with_retry(label: str, fn):
+    """Run fn(), offering an interactive retry on failure instead of silently
+    giving up — e.g. so an expired `claude` login can be fixed in another
+    terminal and retried without losing the transcript already in hand.
+
+    Returns (result, None) on success or (None, last_error_message) if it
+    never succeeds. Never raises: callers already have a good transcript and
+    must not lose it to a failure in an enrichment step like this.
+    """
+    while True:
+        try:
+            return fn(), None
+        except Exception as exc:
+            error = str(exc)
+            click.echo(f"Warning: {label} failed: {error}", err=True)
+            if not sys.stdin.isatty() or not click.confirm(f"Retry {label}?", default=True):
+                return None, error
+
+
 def _do_transcribe_and_summarize(
     config: Config,
     audio_path: Path,
@@ -571,8 +590,6 @@ def _do_transcribe_and_summarize(
     vault_note = None
     vault_error = None
     vault_prepared = None
-    speaker_roles: dict[str, str] = {}
-    speaker_roles_error = None
 
     local_sum = sum_enabled and config.summarization.backend == "local"
     vault_filing_enabled = config.obsidian.enabled
@@ -582,7 +599,6 @@ def _do_transcribe_and_summarize(
         diarize=diar_enabled,
         summarize=sum_enabled,
         download_summarizer=local_sum,
-        identify_speakers=identify_speakers,
     ) as progress:
         try:
             transcriber = _create_transcriber(config, progress=progress)
@@ -596,19 +612,6 @@ def _do_transcribe_and_summarize(
         result = transcriber.transcribe(audio_path)
         ext = "json" if config.output.format == "json" else "md"
         transcript_path = out_dir / f"transcript.{ext}"
-
-        if identify_speakers and result.has_speakers:
-            progress.begin("identifying_speakers")
-            try:
-                from ownscribe.speaker_naming import get_speaker_roles
-
-                speaker_roles = get_speaker_roles(config, result)
-                progress.complete("identifying_speakers")
-            except Exception as exc:
-                # Never let this block the transcript — worst case we just keep
-                # the anonymous SPEAKER_XX labels.
-                progress.fail("identifying_speakers")
-                speaker_roles_error = str(exc)
 
         if sum_enabled:
             try:
@@ -642,14 +645,16 @@ def _do_transcribe_and_summarize(
             finally:
                 summarizer.close()
 
-    # --- All user-facing output (and any interactive prompts) after TUI exits ---
+    # --- All user-facing output (and any interactive prompts, and retries)
+    # happen after the TUI exits: both the live-rendering checklist and a
+    # click.confirm() prompt fight over the terminal if run concurrently. ---
     name_mapping: dict[str, str] = {}
     if identify_speakers and result.has_speakers:
-        if speaker_roles_error is not None:
-            click.echo(f"Warning: could not identify speakers: {speaker_roles_error}", err=True)
-        elif sys.stdin.isatty():
-            from ownscribe.speaker_naming import apply_speaker_names, prompt_for_names
+        from ownscribe.speaker_naming import apply_speaker_names, get_speaker_roles, prompt_for_names
 
+        click.echo("Identifying speakers...")
+        speaker_roles, _ = _run_with_retry("speaker identification", lambda: get_speaker_roles(config, result))
+        if speaker_roles is not None and sys.stdin.isatty():
             name_mapping = prompt_for_names(result, speaker_roles)
             apply_speaker_names(result, name_mapping)
 
@@ -659,18 +664,15 @@ def _do_transcribe_and_summarize(
     click.echo(f"Transcript saved to {transcript_path}")
 
     if vault_filing_enabled:
-        try:
-            from ownscribe.vault_filing import prepare_note
+        from ownscribe.vault_filing import prepare_note
 
-            click.echo("Filing to vault...")
-            vault_prepared = prepare_note(config, result, out_dir, speakers_named=bool(name_mapping))
-        except Exception as exc:
-            # Never let a vault-filing failure (network, auth, bad response)
-            # take down a run that already has a good transcript in hand.
-            vault_error = str(exc)
+        click.echo("Filing to vault...")
+        vault_prepared, vault_error = _run_with_retry(
+            "vault filing", lambda: prepare_note(config, result, out_dir, speakers_named=bool(name_mapping))
+        )
 
     if vault_prepared is not None:
-        from ownscribe.vault_filing import VaultFilingError, write_note
+        from ownscribe.vault_filing import write_note
 
         parsed = vault_prepared.parsed
         should_write = True
@@ -683,12 +685,12 @@ def _do_transcribe_and_summarize(
             should_write = click.confirm("File this into the Obsidian vault?", default=True)
 
         if should_write:
-            try:
-                vault_note = write_note(
+            vault_note, vault_error = _run_with_retry(
+                "writing the vault note",
+                lambda: write_note(
                     parsed, vault_prepared.folder_name, vault_prepared.date, config.obsidian.resolved_vault_dir
-                )
-            except VaultFilingError as exc:
-                vault_error = str(exc)
+                ),
+            )
         else:
             click.echo("Skipped filing to vault.")
 

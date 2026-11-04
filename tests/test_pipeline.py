@@ -287,6 +287,67 @@ class TestGenerateTitleSlug:
         assert _generate_title_slug("summary", mock_summarizer) == ""
 
 
+class TestRunWithRetry:
+    """The interactive retry-on-failure helper (e.g. for an expired claude login)."""
+
+    def test_succeeds_first_try_without_prompting(self):
+        from ownscribe.pipeline import _run_with_retry
+
+        with mock.patch("click.confirm") as mock_confirm:
+            result, error = _run_with_retry("thing", lambda: "ok")
+
+        assert result == "ok"
+        assert error is None
+        mock_confirm.assert_not_called()
+
+    def test_retries_on_confirm_then_succeeds(self):
+        from ownscribe.pipeline import _run_with_retry
+
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("OAuth session expired")
+            return "ok"
+
+        with (
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("click.confirm", return_value=True),
+        ):
+            result, error = _run_with_retry("thing", flaky)
+
+        assert result == "ok"
+        assert error is None
+        assert calls["n"] == 2
+
+    def test_gives_up_when_user_declines_retry(self, capsys):
+        from ownscribe.pipeline import _run_with_retry
+
+        with (
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("click.confirm", return_value=False),
+        ):
+            result, error = _run_with_retry("thing", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        assert result is None
+        assert error == "boom"
+        assert "thing failed: boom" in capsys.readouterr().err
+
+    def test_non_interactive_gives_up_without_prompting(self):
+        from ownscribe.pipeline import _run_with_retry
+
+        with (
+            mock.patch("sys.stdin.isatty", return_value=False),
+            mock.patch("click.confirm") as mock_confirm,
+        ):
+            result, error = _run_with_retry("thing", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        assert result is None
+        assert error == "boom"
+        mock_confirm.assert_not_called()
+
+
 class TestRenameOutputDir:
     def test_renames_when_target_does_not_exist(self, tmp_path):
         from ownscribe.pipeline import _rename_output_dir
@@ -1205,6 +1266,85 @@ class TestVaultFilingConfirmation:
         assert len(written) == 1
 
 
+class TestVaultFilingRetry:
+    """Retrying vault filing after a transient failure (e.g. expired claude login)."""
+
+    def _base_config(self, tmp_path):
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = False
+        config.obsidian.enabled = True
+        config.obsidian.confirm_before_filing = False
+        config.obsidian.vault_dir = str(tmp_path / "vault")
+        return config
+
+    def _audio_and_out_dir(self, tmp_path):
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        return audio_path, out_dir
+
+    def test_retry_after_auth_failure_succeeds(self, tmp_path, capsys):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+        from ownscribe.vault_filing import PreparedNote
+
+        config = self._base_config(tmp_path)
+        audio_path, out_dir = self._audio_and_out_dir(tmp_path)
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = TranscriptResult(
+            segments=[Segment(text="Hello world.", start=0.0, end=1.5)], language="en", duration=1.5
+        )
+        prepared = PreparedNote(
+            parsed={"title": "Test Meeting", "category": "Personal", "tags": ["personal"], "body_markdown": "body"},
+            folder_name="out",
+            date="2026-08-19",
+        )
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch(
+                "ownscribe.vault_filing.prepare_note",
+                side_effect=[RuntimeError("OAuth session expired and could not be refreshed"), prepared],
+            ),
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("click.confirm", return_value=True),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
+
+        err = capsys.readouterr().err
+        assert "OAuth session expired" in err
+        written = list((tmp_path / "vault" / "Personal").glob("*.md"))
+        assert len(written) == 1
+
+    def test_declining_retry_leaves_transcript_intact(self, tmp_path, capsys):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = self._base_config(tmp_path)
+        audio_path, out_dir = self._audio_and_out_dir(tmp_path)
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = TranscriptResult(
+            segments=[Segment(text="Hello world.", start=0.0, end=1.5)], language="en", duration=1.5
+        )
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch(
+                "ownscribe.vault_filing.prepare_note",
+                side_effect=RuntimeError("OAuth session expired and could not be refreshed"),
+            ),
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("click.confirm", return_value=False),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
+
+        assert (out_dir / "transcript.md").exists()
+        assert not (tmp_path / "vault").exists()
+        assert "vault filing failed" in capsys.readouterr().err
+
+
 class TestSpeakerNamingIntegration:
     """Interactive speaker naming wired into _do_transcribe_and_summarize."""
 
@@ -1312,6 +1452,55 @@ class TestSpeakerNamingIntegration:
 
         assert (out_dir / "transcript.md").exists()
         assert "network down" in capsys.readouterr().err
+
+
+class TestSpeakerNamingRetry:
+    """Retrying speaker-role lookup after a transient failure (e.g. expired claude login)."""
+
+    def _diarized_transcript(self) -> TranscriptResult:
+        return TranscriptResult(
+            segments=[
+                Segment(text="Let's start.", start=0.0, end=1.0, speaker="SPEAKER_00"),
+                Segment(text="Sounds good.", start=1.0, end=2.0, speaker="SPEAKER_01"),
+            ],
+            language="en",
+            duration=2.0,
+        )
+
+    def test_retry_after_auth_failure_succeeds(self, tmp_path, capsys):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.output.format = "markdown"
+        config.summarization.enabled = False
+        config.obsidian.enabled = False
+        config.diarization.enabled = True
+        config.diarization.hf_token = "fake-token"
+        config.diarization.ask_speaker_names = True
+
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = self._diarized_transcript()
+        roles = {"SPEAKER_00": "Led the meeting.", "SPEAKER_01": "Took notes."}
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch(
+                "ownscribe.speaker_naming.get_speaker_roles",
+                side_effect=[RuntimeError("OAuth session expired and could not be refreshed"), roles],
+            ),
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("click.confirm", return_value=True),
+            mock.patch("ownscribe.speaker_naming.prompt_for_names", return_value={"SPEAKER_00": "Alice"}),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, out_dir, summarize=False)
+
+        assert "OAuth session expired" in capsys.readouterr().err
+        assert "Alice" in (out_dir / "transcript.md").read_text()
 
 
 def _avaudiofile_style_header() -> bytes:

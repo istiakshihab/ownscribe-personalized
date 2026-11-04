@@ -155,6 +155,24 @@ def yaml_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+# `/` is the one that actually breaks on POSIX — Path./write_text silently
+# tries to descend into a directory that doesn't exist (the bug this fixes:
+# a Claude-generated title like "Signup/Submission UI" turned into a bogus
+# nested path and raised FileNotFoundError). The rest are Windows-reserved;
+# stripped too in case the vault is ever synced there.
+_INVALID_FILENAME_CHARS_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def sanitize_filename_component(s: str) -> str:
+    """Make a string safe to use as a single path segment (no `/`, no control
+    chars). Only for filenames — never applied to the frontmatter title
+    itself, which keeps the real text Claude generated."""
+    cleaned = _INVALID_FILENAME_CHARS_RE.sub(" ", s)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.rstrip(". ")  # trailing dots/spaces are invalid on Windows
+    return cleaned or "Untitled"
+
+
 def write_note(parsed: dict, folder_name: str, date: str, vault_dir: Path) -> FiledNote:
     category = parsed.get("category", "")
     subfolder = CATEGORY_TO_FOLDER.get(category)
@@ -170,7 +188,7 @@ def write_note(parsed: dict, folder_name: str, date: str, vault_dir: Path) -> Fi
     dest_dir = vault_dir / subfolder
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    base_filename = f"{date} {title}"
+    base_filename = f"{date} {sanitize_filename_component(title)}"
     filename = base_filename + ".md"
     n = 2
     while (dest_dir / filename).exists():

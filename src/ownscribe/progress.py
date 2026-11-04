@@ -286,7 +286,6 @@ class PipelineProgress:
         transcribe: bool = True,
         include_prepare: bool = False,
         download_summarizer: bool = False,
-        identify_speakers: bool = False,
     ) -> None:
         steps: list[_Step] = []
         if include_prepare:
@@ -301,8 +300,6 @@ class PipelineProgress:
                 _Step("embeddings", "Embeddings", indent=1),
                 _Step("clustering", "Clustering", indent=1),
             ])
-        if identify_speakers:
-            steps.append(_Step("identifying_speakers", "Identifying speakers", indent=0))
         if summarize:
             steps.append(_Step("summarizing", "Summarizing", indent=0))
             if download_summarizer:

@@ -118,6 +118,63 @@ class TestWriteNote:
         note = write_note(parsed, "f", "2026-08-19", tmp_path)
         assert "  - podcast" in note.path.read_text()
 
+    def test_slash_in_title_does_not_create_a_subdirectory(self, tmp_path):
+        """Regression test: a Claude-generated title like "Signup/Submission UI"
+        used to be handed straight to Path, so the `/` was read as a directory
+        separator and the write failed with FileNotFoundError."""
+        from ownscribe.vault_filing import write_note
+
+        parsed = {
+            "title": "SLO Coverage, Signup/Submission UI, and Email Fixes Review",
+            "category": "Personal",
+            "tags": ["personal"],
+            "body_markdown": "body",
+        }
+        note = write_note(parsed, "f", "2026-08-19", tmp_path)
+
+        assert note.path.exists()
+        assert note.path.parent == tmp_path / "Personal"
+        assert "/" not in note.path.name
+        # The real title (slash and all) is preserved in the frontmatter.
+        assert "Signup/Submission" in note.path.read_text()
+
+    def test_other_invalid_filename_chars_are_sanitized(self, tmp_path):
+        from ownscribe.vault_filing import write_note
+
+        parsed = {
+            "title": 'Q&A: "Roadmap" <Draft> | v2?*',
+            "category": "Personal",
+            "tags": ["personal"],
+            "body_markdown": "body",
+        }
+        note = write_note(parsed, "f", "2026-08-19", tmp_path)
+
+        assert note.path.exists()
+        for char in '\\/:*?"<>|':
+            assert char not in note.path.name
+
+
+class TestSanitizeFilenameComponent:
+    def test_strips_slash(self):
+        from ownscribe.vault_filing import sanitize_filename_component
+
+        assert "/" not in sanitize_filename_component("Signup/Submission UI")
+
+    def test_collapses_whitespace_from_replaced_chars(self):
+        from ownscribe.vault_filing import sanitize_filename_component
+
+        assert sanitize_filename_component("A / B") == "A B"
+
+    def test_strips_trailing_dots_and_spaces(self):
+        from ownscribe.vault_filing import sanitize_filename_component
+
+        assert sanitize_filename_component("Draft. . ") == "Draft"
+
+    def test_empty_result_falls_back_to_untitled(self):
+        from ownscribe.vault_filing import sanitize_filename_component
+
+        assert sanitize_filename_component("///") == "Untitled"
+
 
 class TestBuildPrompt:
     def test_fills_all_placeholders(self, tmp_path, monkeypatch):
