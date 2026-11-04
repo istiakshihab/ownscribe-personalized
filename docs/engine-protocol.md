@@ -16,7 +16,9 @@ GUI ──stdin/stdout JSON lines──▶ ownscribe-audio capture --control std
 - Each processing step is its own short-lived `ownscribe` process. Cancel a job with SIGTERM.
 - `scripts/mock_engine.py` speaks both halves of this protocol with synthetic data, so a client can
   be built before (and tested without) real capture: `mock_engine.py helper` and
-  `mock_engine.py process --events-fd 3`.
+  `mock_engine.py process --events-fd 3`. It also accepts the real tools' command lines (`capture`,
+  `list-apps`, `list-devices`, `session new`, `speakers`, `resummarize`, `doctor`, `templates`), so a
+  client can point both its `ownscribe` command and its helper path at `mock_engine.py [--speed N]`.
 
 Conventions for every stream: UTF-8 JSON, one object per line, `\n`-terminated. Unknown fields must be
 ignored by readers; new fields are added without bumping the protocol version. Levels are dBFS;

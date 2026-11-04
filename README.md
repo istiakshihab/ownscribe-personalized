@@ -180,7 +180,7 @@ ownscribe cleanup                  # remove ownscribe data from disk
 
 ### Driving ownscribe from an app
 
-A GUI (the planned SwiftUI app) records with `bin/ownscribe-audio capture --session DIR --control stdio`
+A GUI (the SwiftUI app in [app/](app/README.md), built with `bash app/build.sh`) records with `bin/ownscribe-audio capture --session DIR --control stdio`
 and runs each processing step as a job that reports JSON events. See [docs/engine-protocol.md](docs/engine-protocol.md);
 `scripts/mock_engine.py` fakes both halves and `scripts/engine_demo.py` drives the real ones from a terminal.
 

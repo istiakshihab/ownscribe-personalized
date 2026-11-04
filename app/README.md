@@ -1,0 +1,62 @@
+# ownscribe recorder (macOS app)
+
+A native SwiftUI front end for ownscribe with Liquid Glass materials (macOS 26+). It drives the
+backend exactly as [docs/engine-protocol.md](../docs/engine-protocol.md) describes:
+
+- **Recording:** `ownscribe session new --json` makes the session folder, then the app spawns
+  `ownscribe-audio capture --session DIR --control stdio --mic --mic-auto|--mic-device UID --exclude-bundle com.ownscribe.app`,
+  sends mixer commands on its stdin and reads events (levels, sources, mic, notices, saved) from its stdout.
+  Helper stderr goes to `~/Library/Logs/ownscribe/app.log`.
+- **Processing:** after `saved`, `ownscribe process DIR --events-fd 3` with the template and the
+  Diarization/Summarization switches. Speaker names run `ownscribe speakers DIR --set SPEAKER_00=Name`;
+  a template change after a summary runs `ownscribe resummarize DIR --template T`. Cancel sends SIGTERM.
+- **Setup check:** `ownscribe doctor --json` problems show as banners under the title bar.
+
+## Build and run
+
+Needs only the Command Line Tools (no Xcode project):
+
+```bash
+bash swift/build.sh            # the capture helper, bin/ownscribe-audio
+bash app/build.sh              # app/build/ownscribe.app (release, ad-hoc signed)
+open app/build/ownscribe.app
+```
+
+`bash app/build.sh debug --open` builds a debug app and launches it.
+
+The first recording asks for **Microphone** and **System Audio Recording** access for "ownscribe"
+(the app is responsible for the helper it spawns). The signature is ad-hoc, so a rebuild may ask again.
+
+## Settings
+
+ownscribe ▸ Settings… holds the two commands the app runs:
+
+| setting | default |
+|---|---|
+| ownscribe command | `uv run --project ~/Codes/ownscribe ownscribe` |
+| Capture helper | `~/Codes/ownscribe/bin/ownscribe-audio` |
+
+Bare names are looked up in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin`
+too, since a GUI app gets launchd's minimal PATH. Extra words are passed through, e.g.
+`… ownscribe --model base` to try a small Whisper model.
+
+**Use mock engine** points both at `scripts/mock_engine.py --speed 5`, which fakes capture and
+processing with synthetic data (no permissions, models or audio needed). **Use defaults** switches back.
+
+## Layout
+
+- `Sources/OwnscribeApp/Engine/` — `ChildProcess` (posix_spawn with an extra fd 3 for job events),
+  `HelperConnection`, `JobProcess`, one-shot `Tools` (listings, `session new`, `doctor`, `templates`).
+- `Model/` — `RecorderModel` (helper lifecycle, mixer, meters, mic, notices), `PipelineModel`
+  (jobs, stages, transcript, speakers, summary), `LevelHistory` (the last 60 s, averaged into fixed
+  0.25 s buckets so the past never reshapes), `AppModel` (wiring, doctor, banners).
+- `Views/` — title bar (toolbar), signal chart, mixer strips, pickers, after-recording panel.
+
+Notes:
+
+- In the macOS 27 SDK `@State` is a compiler macro whose plugin ships only with Xcode; the views use
+  the `ViewState` typealias (SwiftUI's `State` property wrapper) so the Command Line Tools can build it.
+- `build.sh` uses `swift build --build-system native`: SwiftPM's newer default fails before compiling
+  with only the Command Line Tools installed.
+- Per-app capture can't split out Safari (it plays through the shared WebKit GPU process), so the
+  Add source list shows it disabled.
