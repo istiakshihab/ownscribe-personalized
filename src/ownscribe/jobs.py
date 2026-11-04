@@ -491,7 +491,14 @@ def doctor(config: Config) -> dict[str, Any]:
         claude = resolve_claude_bin(config.obsidian.claude_bin)
         checks["claude"] = {"ok": True, "path": claude}
     except Exception as exc:
-        checks["claude"] = {"ok": not config.obsidian.enabled, "path": None, "message": str(exc)}
+        needed = config.obsidian.enabled or config.summarization.backend == "claude"
+        checks["claude"] = {"ok": not needed, "path": None, "message": str(exc)}
+    backend = config.summarization.backend
+    checks["summarizer"] = {
+        "ok": backend != "claude" or checks["claude"]["path"] is not None,
+        "backend": backend,
+        "model": "sonnet" if backend == "claude" else config.summarization.model,
+    }
     helper = _find_binary()
     checks["capture_helper"] = {
         "ok": helper is not None,

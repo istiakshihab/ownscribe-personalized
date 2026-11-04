@@ -38,7 +38,7 @@ ask_speaker_names = true  # interactively name SPEAKER_00/01/... after diarizati
 
 [summarization]
 enabled = true
-backend = "local"         # "local" (built-in, no server needed), "ollama", or "openai"
+backend = "local"         # "local" (built-in, no server needed), "claude" (claude CLI), "ollama", or "openai"
 model = "phi-4-mini"      # local: "phi-4-mini", path to GGUF, or hf:owner/repo/file.gguf; ollama/openai: model name
 # host = "http://localhost:11434"  # only for ollama/openai backends
 # api_key = ""            # only for openai backend; required by servers like oMLX (or set OPENAI_API_KEY)

@@ -425,6 +425,7 @@ def run_doctor(_args: argparse.Namespace) -> int:
         "capture_helper": {"ok": True, "path": __file__, "session_mode": True},
         "disk": {"ok": True, "free_bytes": 50 * 1024**3, "path": str(Path(tempfile.gettempdir()) / "ownscribe-mock")},
         "whisper_model": {"ok": True, "cached": False, "model": "mock-whisper", "required": False},
+        "summarizer": {"ok": True, "backend": "claude", "model": "sonnet"},
     }
     print(json.dumps({"ok": True, "checks": checks}, indent=2))
     return 0

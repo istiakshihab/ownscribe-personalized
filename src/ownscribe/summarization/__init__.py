@@ -16,6 +16,12 @@ _INSTALL_HINTS = {
 def create_summarizer(config: Config) -> Summarizer:
     """Create the appropriate summarizer based on config."""
     backend = config.summarization.backend
+    if backend == "claude":
+        from ownscribe.summarization.claude_summarizer import ClaudeSummarizer
+
+        return ClaudeSummarizer(
+            config.summarization, config.templates, claude_bin=config.obsidian.claude_bin or config.paths.claude
+        )
     if backend == "local":
         from ownscribe.summarization.llama_cpp_summarizer import LlamaCppSummarizer
 

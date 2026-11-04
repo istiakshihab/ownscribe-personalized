@@ -128,6 +128,10 @@ pip install -e '.[openai]'   # use any OpenAI-compatible server (LM Studio, llam
 pip install -e '.[all]'      # install everything (default above)
 ```
 
+Or set `backend = "claude"` in `[summarization]` to summarize with the headless `claude` CLI (Claude Code,
+Sonnet, no tools) — the same integration vault filing uses. It needs no extra install, just a signed-in
+`claude` on PATH (or `[paths] claude`).
+
 ## Usage
 
 ### Record, transcribe, and summarize a meeting
@@ -254,7 +258,7 @@ ask_speaker_names = true  # interactively name SPEAKER_00/01/... after diarizati
 
 [summarization]
 enabled = true
-backend = "local"         # "local" (built-in, no server needed), "ollama", or "openai"
+backend = "local"         # "local" (built-in, no server needed), "claude" (claude CLI), "ollama", or "openai"
 model = "phi-4-mini"      # local: "phi-4-mini", path to GGUF, or hf:owner/repo/file.gguf; ollama/openai: model name
 # host = "http://localhost:11434"  # only for ollama/openai backends
 # api_key = ""            # only for openai backend; required by servers like oMLX (or set OPENAI_API_KEY)

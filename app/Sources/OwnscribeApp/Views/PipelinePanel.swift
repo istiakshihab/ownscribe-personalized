@@ -85,7 +85,7 @@ struct PipelinePanel: View {
             Toggle("Summarization", isOn: $p.summarizeOn).labelsHidden().toggleStyle(.switch).controlSize(.mini)
                 .disabled(pipeline.isProcessing)
         }) {
-            Text("Your summary template, on this Mac").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+            Text(app.doctor?.summarizerLabel ?? "Your summary template").font(.system(size: 12)).foregroundStyle(Theme.ink3)
                 .opacity(pipeline.summarizationOff ? 0.45 : 1)
             Picker("Summary template", selection: Binding(get: { pipeline.template }, set: { pipeline.selectTemplate($0) })) {
                 ForEach(pipeline.templates, id: \.self) { Text($0.capitalized).tag($0) }

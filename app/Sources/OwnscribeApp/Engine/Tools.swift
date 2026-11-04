@@ -63,6 +63,19 @@ struct DoctorReport: Sendable {
     var outputDir: String?
     var whisperModel: String?
     var whisperCached = true
+    /// `[summarization] backend` and model, e.g. ("claude", "sonnet") or ("local", "phi-4-mini").
+    var summarizerBackend: String?
+    var summarizerModel: String?
+
+    /// For the Summarization card.
+    var summarizerLabel: String? {
+        switch summarizerBackend {
+        case nil: return nil
+        case "claude": return "Claude \((summarizerModel ?? "sonnet").capitalized) · claude CLI"
+        case "local": return "\(summarizerModel ?? "Local model") · on this Mac"
+        case let backend?: return "\(summarizerModel ?? backend) · \(backend)"
+        }
+    }
 }
 
 enum Tools {
@@ -155,7 +168,7 @@ enum Tools {
             if let c = check("hf_token"), c.bool("ok") == false {
                 report.problems.append(.init(id: "hf_token", message: "No Hugging Face token, so diarization will be skipped. Add one in Settings → Hugging Face.", isWarning: true))
             }
-            if let c = check("claude"), c.bool("ok") == false {
+            if let c = check("claude"), c.bool("ok") == false, check("summarizer")?.bool("ok") != false {
                 report.problems.append(.init(id: "claude", message: "The claude CLI isn't found (needed for vault filing): \(c.string("message") ?? "set [paths] claude").", isWarning: true))
             }
             if let c = check("capture_helper"), c.bool("ok") == false || c.bool("session_mode") == false {
@@ -169,6 +182,13 @@ enum Tools {
             if let w = check("whisper_model") {
                 report.whisperModel = w.string("model")
                 report.whisperCached = w.bool("cached") ?? true
+            }
+            if let s = check("summarizer") {
+                report.summarizerBackend = s.string("backend")
+                report.summarizerModel = s.string("model")
+                if s.bool("ok") == false, s.string("backend") == "claude" {
+                    report.problems.append(.init(id: "summarizer", message: "Summaries use the claude CLI, which isn't found. Install Claude Code or set [paths] claude in ~/.config/ownscribe/config.toml.", isWarning: true))
+                }
             }
             return .success(report)
         }

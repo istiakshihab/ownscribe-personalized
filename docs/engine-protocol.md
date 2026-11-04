@@ -187,7 +187,7 @@ when given one (the GUI passes an extra pipe as fd 3), and log human text to std
 | `ownscribe file SESSION --preview --json` / `--write [--edits FILE]` | Obsidian vault note: preview, then write |
 | `ownscribe sessions [--output-dir DIR] --json` | list sessions with stage status |
 | `ownscribe templates --json` | built-in and custom summary templates |
-| `ownscribe doctor --json` | ffmpeg, Hugging Face token, claude CLI, cached models, disk space |
+| `ownscribe doctor --json` | ffmpeg, Hugging Face token, claude CLI, summarizer (`backend`, `model`), cached models, disk space |
 | `ownscribe warmup --events-fd N` | download and cache models, with progress |
 
 ### Job events (on `--events-fd`)
