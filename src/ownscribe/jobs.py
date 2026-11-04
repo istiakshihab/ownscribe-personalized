@@ -421,7 +421,11 @@ def resummarize(config: Config, path: Path, template: str, *, sink: EventSink | 
 
 
 def vault_preview(config: Config, path: Path, *, sink: EventSink | None = None) -> dict[str, Any]:
-    from ownscribe.vault_filing import prepare_note
+    """Draft the vault note. The result (and the `vault_preview` event) also says where it would go and
+    how the GUI should file it: `confirm` mirrors [obsidian] confirm_before_filing, `folders` maps each
+    category to its vault folder (anything else lands in `fallback_folder`, flagged for review), and
+    `filed` is the note an earlier write made, if any (writing again makes a second note)."""
+    from ownscribe.vault_filing import CATEGORY_TO_FOLDER, FALLBACK_FOLDER, prepare_note
 
     sink = sink or NullSink()
     state = sessions.load(path)
@@ -436,8 +440,20 @@ def vault_preview(config: Config, path: Path, *, sink: EventSink | None = None) 
     preview = {**prepared.parsed, "folder": prepared.folder_name, "date": prepared.date}
     state["vault_preview"] = preview
     sessions.set_stage(path, state, "vault", "pending", previewed=True)
-    sink.emit("vault_preview", **{k: preview.get(k) for k in ("title", "category", "tags", "body_markdown")})
-    return preview
+    category = preview.get("category", "")
+    info = {
+        "date": preview["date"],
+        "destination": CATEGORY_TO_FOLDER.get(category, FALLBACK_FOLDER),
+        "needs_review": category not in CATEGORY_TO_FOLDER,
+        "folders": dict(CATEGORY_TO_FOLDER),
+        "fallback_folder": FALLBACK_FOLDER,
+        "vault_dir": str(config.obsidian.resolved_vault_dir),
+        "confirm": config.obsidian.confirm_before_filing,
+        "names": names,
+        "filed": state.get("vault_note"),
+    }
+    sink.emit("vault_preview", **{k: preview.get(k) for k in ("title", "category", "tags", "body_markdown")}, **info)
+    return {**preview, **info}
 
 
 def vault_write(
@@ -504,6 +520,14 @@ def doctor(config: Config) -> dict[str, Any]:
         "ok": helper is not None,
         "path": str(helper) if helper else None,
         "session_mode": _helper_has_sessions(helper),
+    }
+    vault = config.obsidian.resolved_vault_dir
+    checks["obsidian"] = {
+        "ok": not config.obsidian.enabled or (vault.is_dir() and checks["claude"]["path"] is not None),
+        "enabled": config.obsidian.enabled,
+        "vault_dir": str(vault),
+        "vault_exists": vault.is_dir(),
+        "confirm": config.obsidian.confirm_before_filing,
     }
     out = config.output.resolved_dir
     probe = out if out.exists() else Path.home()

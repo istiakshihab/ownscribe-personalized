@@ -215,7 +215,7 @@ when given one (the GUI passes an extra pipe as fd 3), and log human text to std
 | `ownscribe file SESSION --preview --json` / `--write [--edits FILE]` | Obsidian vault note: preview, then write |
 | `ownscribe sessions [--output-dir DIR] --json` | list sessions with stage status |
 | `ownscribe templates --json` | built-in and custom summary templates |
-| `ownscribe doctor --json` | ffmpeg, Hugging Face token, claude CLI, summarizer (`backend`, `model`), cached models, disk space |
+| `ownscribe doctor --json` | ffmpeg, Hugging Face token, claude CLI, summarizer (`backend`, `model`), Obsidian vault (`enabled`, `vault_dir`, `vault_exists`, `confirm`), cached models, disk space |
 | `ownscribe warmup --events-fd N` | download and cache models, with progress |
 
 ### Job events (on `--events-fd`)
@@ -231,9 +231,15 @@ Every event has `"ev"` and `"ts"` (Unix time).
 | `speakers` | `labels`, `names`, `roles` (suggestions; may be empty) |
 | `summary` | `template`, `title`, `text` (rendered with current names), `path` |
 | `session_moved` | `from`, `to` |
-| `vault_preview` | `title`, `category`, `tags`, `body_markdown` |
+| `vault_preview` | `title`, `category`, `tags`, `body_markdown`, `date`; where it goes: `destination` (vault folder), `needs_review`, `folders` (category → folder), `fallback_folder`, `vault_dir`; `confirm` ([obsidian] confirm_before_filing), `names` (speaker names in the draft), `filed` (an earlier note, or null) |
 | `vault_note` | `path`, `needs_review` |
 | `error` | `stage`?, `code`, `message` |
+
+A GUI files a session in two jobs, as the terminal does: `file --preview` drafts the note with Claude
+(nothing is written), then `file --write --edits FILE` writes it, with any of `title`, `category`,
+`tags`, `body_markdown` changed. A category outside `folders` lands in `fallback_folder` with
+`status: "needs-review"`. When `confirm` is false the client can write straight after the preview.
+Writing twice makes two notes, which is why the preview reports `filed`.
 
 Stage names follow the terminal display: `preparing_models`, `transcribing`, `diarizing` with the
 sub-steps `segmentation`, `speaker_counting`, `embeddings`, `clustering`, then `summarizing` and

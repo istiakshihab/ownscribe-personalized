@@ -7,6 +7,9 @@ Lets a GUI client be built and tested without real capture, permissions or model
     mock_engine.py process SESSION [--events-fd 3]      # like: ownscribe process SESSION --events-fd 3
         [--template meeting|lecture|brief] [--no-diarize] [--no-summarize] [--speed 1.0]
 
+Vault filing follows OWNSCRIBE_MOCK_VAULT=ask (default), auto or off, as [obsidian] would; `file --write` only
+reports where the note would go.
+
 To see a source die mid-recording, set OWNSCRIBE_MOCK_LOSE to `SOURCE@AT+FOR` items (seconds; FOR `inf` never
 recovers), e.g. `mic@8+4,app:us.zoom.xos@15+inf`, or send `debug_fail_source` like the real helper's tests do.
 
@@ -18,6 +21,7 @@ its capture helper at this script (`mock_engine.py [--speed N] <command> ...`):
     session new [--output-dir DIR] --json        # default parent: $TMPDIR/ownscribe-mock
     speakers SESSION --set SPEAKER_00=Name ... --events-fd 3
     resummarize SESSION --template T --events-fd 3
+    file SESSION --preview|--write [--edits FILE] --events-fd 3   # never touches a real vault
     doctor --json · templates --json
 
 Jobs touch the session folder only if it exists: `process` writes session.json and summary.raw.md and
@@ -454,6 +458,58 @@ def run_resummarize(args: argparse.Namespace) -> int:
     return 0
 
 
+MOCK_FOLDERS = {
+    "Portrait": "Portrait/Meetings", "Research": "Research", "Oregon State University": "Oregon State University",
+    "Job Search": "Job Search", "Monolog": "Monolog", "Personal": "Personal", "Podcast": "Podcast",
+}
+MOCK_VAULT = "~/Documents/obsidian/Personal"
+
+
+def _vault_mode() -> str:
+    mode = os.environ.get("OWNSCRIBE_MOCK_VAULT", "ask")
+    return mode if mode in ("ask", "auto", "off") else "ask"
+
+
+def run_file(args: argparse.Namespace) -> int:
+    emit, close = _emitter(args.events_fd)
+    speed = max(0.05, args.speed)
+    session = args.session.rstrip("/")
+    state = _load_state(session)
+    names = state["speakers"].get("names", {})
+    emit("job", command="file", session=session, status="started")
+    if args.preview:
+        time.sleep(3 / speed)  # Claude reading the transcript
+        draft = {"title": "Recorder layout review", "category": "Portrait",
+                 "tags": ["portrait", "meeting", "recorder-ui"],
+                 "body_markdown": _render("## Summary\n\nSPEAKER_00 and SPEAKER_01 reviewed the recorder layout "
+                                          "and kept the chart left and the mixer right.\n\n## Action Items\n\n"
+                                          "- [ ] SPEAKER_00 shares the mockup by Friday", names),
+                 "date": Path(session).name[:10]}
+        state["vault_preview"] = draft
+        _save_state(session, state)
+        emit("vault_preview", **draft, destination=MOCK_FOLDERS["Portrait"], needs_review=False, folders=MOCK_FOLDERS,
+             fallback_folder="Meetings Inbox", vault_dir=str(Path(MOCK_VAULT).expanduser()),
+             confirm=_vault_mode() != "auto", names=names, filed=state.get("vault_note"))
+    else:
+        draft = state.get("vault_preview")
+        if not draft:
+            emit("error", stage="vault", code="no_preview", message="Run `ownscribe file SESSION --preview` first")
+            close()
+            return 1
+        if args.edits:
+            draft = {**draft, **json.loads(Path(args.edits).read_text())}
+        time.sleep(0.5 / speed)
+        folder = MOCK_FOLDERS.get(draft.get("category", ""), "Meetings Inbox")
+        note = {"path": str(Path(MOCK_VAULT).expanduser() / folder / f"{draft['date']} {draft['title']}.md"),
+                "needs_review": folder == "Meetings Inbox"}
+        state["vault_note"] = note
+        _save_state(session, state)
+        emit("vault_note", **note)
+    emit("job", command="file", session=session, status="done")
+    close()
+    return 0
+
+
 def run_session_new(args: argparse.Namespace) -> int:
     import tempfile
     from datetime import datetime
@@ -481,6 +537,8 @@ def run_doctor(_args: argparse.Namespace) -> int:
         "disk": {"ok": True, "free_bytes": 50 * 1024**3, "path": str(Path(tempfile.gettempdir()) / "ownscribe-mock")},
         "whisper_model": {"ok": True, "cached": False, "model": "mock-whisper", "required": False},
         "summarizer": {"ok": True, "backend": "claude", "model": "sonnet"},
+        "obsidian": {"ok": True, "enabled": _vault_mode() != "off", "vault_dir": str(Path(MOCK_VAULT).expanduser()),
+                     "vault_exists": True, "confirm": _vault_mode() != "auto"},
     }
     print(json.dumps({"ok": True, "checks": checks}, indent=2))
     return 0
@@ -535,6 +593,10 @@ def main() -> int:
     spk.add_argument("--suggest", action="store_true")
     res = job("resummarize", "act like ownscribe resummarize SESSION --template T")
     res.add_argument("--template", required=True)
+    fil = job("file", "act like ownscribe file SESSION --preview|--write (never writes into a vault)")
+    fil.add_argument("--preview", action="store_true")
+    fil.add_argument("--write", action="store_true")
+    fil.add_argument("--edits")
 
     # The global --speed comes before the command; a job's own --speed wins when given.
     global_speed = None
@@ -566,6 +628,8 @@ def main() -> int:
         return run_speakers(args)
     if args.mode == "resummarize":
         return run_resummarize(args)
+    if args.mode == "file":
+        return run_file(args)
     return run_process(args)
 
 

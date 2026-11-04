@@ -361,9 +361,48 @@ class TestSpeakersAndSummary:
 
         assert prep.call_args[0][2] == path  # the note links to the folder's final, renamed path
         assert preview["title"] == "Ship plan"
+        assert preview["destination"] == "Research" and preview["needs_review"] is False
+        assert preview["folders"]["Portrait"] == "Portrait/Meetings" and preview["fallback_folder"] == "Meetings Inbox"
+        assert preview["confirm"] is config.obsidian.confirm_before_filing and preview["filed"] is None
+        assert "destination" not in sessions.load(path)["vault_preview"]  # only the draft itself is stored
         assert write.call_args[0][0]["title"] == "Edited title"
         assert filed == {"path": str(note.path), "needs_review": False}
         assert sessions.load(path)["stages"]["vault"]["status"] == "done"
+
+    def test_preview_flags_an_unknown_category_and_an_earlier_note(self, config, session_dir, tmp_path):
+        from ownscribe.vault_filing import FiledNote, PreparedNote
+
+        path = self._processed(config, session_dir)
+        prepared = PreparedNote(parsed={"title": "?", "category": "Unknown", "tags": [], "body_markdown": "-"},
+                                folder_name=path.name, date="2026-11-03")
+        note = FiledNote(path=tmp_path / "Meetings Inbox" / "n.md", needs_review=True)
+        events = []
+        sink = mock.Mock(emit=lambda ev, **f: events.append((ev, f)))
+        with mock.patch("ownscribe.vault_filing.prepare_note", return_value=prepared), \
+             mock.patch("ownscribe.vault_filing.write_note", return_value=note):
+            jobs.vault_preview(config, path)
+            jobs.vault_write(config, path)
+            again = jobs.vault_preview(config, path, sink=sink)
+
+        assert again["destination"] == "Meetings Inbox" and again["needs_review"] is True
+        assert again["filed"] == {"path": str(note.path), "needs_review": True}
+        [(ev, fields)] = events
+        assert ev == "vault_preview" and fields["destination"] == "Meetings Inbox" and fields["title"] == "?"
+
+    def test_doctor_reports_the_vault(self, config, tmp_path):
+        vault = tmp_path / "vault"
+        config.obsidian.vault_dir = str(vault)
+
+        def run_doctor():
+            with mock.patch("ownscribe.claude_cli.resolve_claude_bin", return_value="/bin/claude"), \
+                 mock.patch("ownscribe.audio.coreaudio._find_binary", return_value=None):
+                return jobs.doctor(config)["checks"]["obsidian"]
+
+        missing = run_doctor()
+        assert missing["vault_exists"] is False and missing["ok"] is (not config.obsidian.enabled)
+        vault.mkdir()
+        assert run_doctor() == {"ok": True, "enabled": config.obsidian.enabled, "vault_dir": str(vault),
+                                "vault_exists": True, "confirm": config.obsidian.confirm_before_filing}
 
     def test_write_without_preview_is_refused(self, config, session_dir):
         path = self._processed(config, session_dir)

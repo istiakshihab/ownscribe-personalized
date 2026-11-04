@@ -1,8 +1,8 @@
 import Foundation
 import Observation
 
-/// After-recording processing: one `ownscribe` job at a time (process, speakers, resummarize),
-/// its stage progress, the transcript, speaker names and the summary.
+/// After-recording processing: one `ownscribe` job at a time (process, speakers, resummarize, file),
+/// its stage progress, the transcript, speaker names, the summary and the Obsidian note.
 @MainActor
 @Observable
 final class PipelineModel {
@@ -58,6 +58,13 @@ final class PipelineModel {
     var jobCommand: String?
     var templates = ["meeting", "lecture", "brief"]
 
+    // Obsidian vault filing (`ownscribe file`): draft the note, review it unless [obsidian] says not to, write it.
+    var vaultSettings: VaultSettings?
+    var vault = Stage()
+    var vaultDraft: VaultDraft?
+    var vaultNote: VaultNote?
+    var reviewingVault = false
+
     var diarizeOn = Prefs.bool(Prefs.diarize) { didSet { Prefs.defaults.set(diarizeOn, forKey: Prefs.diarize) } }
     var summarizeOn = Prefs.bool(Prefs.summarize) { didSet { Prefs.defaults.set(summarizeOn, forKey: Prefs.summarize) } }
     var template = Prefs.string(Prefs.template) { didSet { Prefs.defaults.set(template, forKey: Prefs.template) } }
@@ -69,6 +76,11 @@ final class PipelineModel {
     @ObservationIgnored private var renamePending = false
     @ObservationIgnored private var templatePending: String?
     @ObservationIgnored private var segmentCounter = 0
+    private enum VaultNext { case review, write }
+    /// What to do when the running draft comes back.
+    @ObservationIgnored private var vaultNext: VaultNext?
+    /// A draft that waits for the running job.
+    @ObservationIgnored private var vaultPending: VaultNext?
     /// What the last `process` run actually did (for "Off" vs "Waits").
     var ranDiarize = true
     var ranSummarize = true
@@ -99,6 +111,12 @@ final class PipelineModel {
         summary = nil
         summaryUnseen = false
         lastError = nil
+        vault = Stage()
+        vaultDraft = nil
+        vaultNote = nil
+        reviewingVault = false
+        vaultNext = nil
+        vaultPending = nil
     }
 
     func process(session: String) {
@@ -140,6 +158,26 @@ final class PipelineModel {
     private func finished(_ command: String, code: Int32, stderr: String) {
         job = nil
         jobCommand = nil
+        if command == "file" {
+            finishedFiling(code: code, stderr: stderr)
+        } else {
+            finishedProcessing(command, code: code, stderr: stderr)
+        }
+        // Work that waited for this job.
+        guard !isRunning else { return }
+        if let next = templatePending {
+            templatePending = nil
+            if next != summary?.template { resummarize(next) }
+        } else if renamePending {
+            renamePending = false
+            commitNames()
+        } else if let next = vaultPending {
+            vaultPending = nil
+            startDraft(then: next)
+        }
+    }
+
+    private func finishedProcessing(_ command: String, code: Int32, stderr: String) {
         switch code {
         case 0, 2:
             for stage in [\PipelineModel.transcription, \.diarization, \.summarization] where self[keyPath: stage].status == .running {
@@ -165,13 +203,10 @@ final class PipelineModel {
         preparingModels = false
         downloadFraction = nil
         loadRawSummary()
-        // Work that waited for this job.
-        if let next = templatePending {
-            templatePending = nil
-            if next != summary?.template { resummarize(next) }
-        } else if renamePending {
-            renamePending = false
-            commitNames()
+        // With confirm_before_filing = false, file right away like the terminal pipeline does.
+        if command == "process", code == 0 || code == 2, canDraft, !vaultOff, vaultSettings?.asks == false {
+            vaultPending = .write
+            vault = Stage(status: .running, detail: "Drafting the note…")
         }
     }
 
@@ -198,6 +233,119 @@ final class PipelineModel {
         guard let path = sessionPath else { return }
         summarization = Stage(status: .running, detail: "Summarizing again as \(name.capitalized)…")
         run("resummarize", [path, "--template", name])
+    }
+
+    // MARK: - Obsidian vault
+
+    /// There's a transcript to file.
+    var canDraft: Bool { hasRun && sessionPath != nil && transcription.status == .done && !segments.isEmpty }
+    var vaultOff: Bool { !(vaultSettings?.enabled ?? false) || !(vaultSettings?.exists ?? false) }
+
+    private var hasUncommittedNames: Bool {
+        labels.contains { label in
+            drafts[label].map { $0.trimmingCharacters(in: .whitespaces) != (names[label] ?? "") } ?? false
+        }
+    }
+
+    /// "File to Obsidian…": draft the note (again if the speaker names changed since), then review it.
+    func fileToVault() {
+        guard canDraft, !vaultOff, vaultNote == nil, vault.status != .running else { return }
+        if let draft = vaultDraft, draft.names == names, !hasUncommittedNames {
+            reviewingVault = true
+            return
+        }
+        if hasUncommittedNames { commitNames() }  // the note should have them
+        if isRunning {
+            vaultPending = .review
+            vault = Stage(status: .running, detail: "Drafting the note after this step…")
+        } else {
+            startDraft(then: .review)
+        }
+    }
+
+    private func startDraft(then next: VaultNext) {
+        guard let path = sessionPath else { return }
+        vaultNext = next
+        vault = Stage(status: .running, detail: "Drafting the note…")
+        run("file", [path, "--preview"])
+        if job == nil { vault = Stage(status: .failed, message: lastError ?? "Couldn't start ownscribe file") }
+    }
+
+    /// Write the (edited) draft into the vault.
+    func writeVault(_ draft: VaultDraft) {
+        guard let path = sessionPath, !isRunning else { return }
+        reviewingVault = false
+        vaultDraft = draft
+        let edits: [String: Any] = [
+            "title": draft.title.trimmingCharacters(in: .whitespacesAndNewlines),
+            "category": draft.category,
+            "tags": draft.tagList,
+            "body_markdown": draft.body,
+        ]
+        let url = URL(fileURLWithPath: path).appendingPathComponent("vault-edits.json")
+        do {
+            try JSONSerialization.data(withJSONObject: edits, options: [.prettyPrinted, .sortedKeys]).write(to: url)
+        } catch {
+            vault = Stage(status: .failed, message: "Couldn't save the edits: \(error.localizedDescription)")
+            return
+        }
+        vaultNext = nil
+        vault = Stage(status: .running, detail: "Filing the note…")
+        run("file", [path, "--write", "--edits", url.path])
+        if job == nil { vault = Stage(status: .failed, message: lastError ?? "Couldn't start ownscribe file") }
+    }
+
+    /// "Don't File": keep the draft, so it can still be filed later.
+    func skipVault() {
+        reviewingVault = false
+        vault = Stage(status: .skipped)
+    }
+
+    private func finishedFiling(code: Int32, stderr: String) {
+        let next = vaultNext
+        vaultNext = nil
+        switch code {
+        case 0:
+            if vaultNote != nil {
+                vault = Stage(status: .done)
+            } else if let draft = vaultDraft {
+                if next == .write {
+                    writeVault(draft)
+                } else {
+                    vault = Stage(status: .waiting)
+                    reviewingVault = true
+                }
+            } else {
+                vault = Stage(status: .failed, message: "ownscribe file returned no draft")
+            }
+        case 130, 143:
+            vault = Stage(status: .cancelled, message: "Cancelled")
+        default:
+            if vault.status != .failed {
+                vault = Stage(status: .failed, message: "Filing failed" + (stderr.isEmpty ? "" : ": \(stderr)"))
+            }
+        }
+    }
+
+    var vaultFoot: String {
+        guard let settings = vaultSettings else { return "Checking the vault…" }
+        if !settings.enabled { return "Off · [obsidian] enabled = false" }
+        if !settings.exists { return "Vault not found: \(settings.dir.abbreviatingHome)" }
+        if let note = vaultNote {
+            let folder = note.folder(in: settings.dir)
+            if vaultDraft.map({ $0.names != names }) == true { return "Filed to \(folder) · before the speakers were renamed" }
+            return note.needsReview ? "Filed to \(folder) · needs review" : "Filed to \(folder)"
+        }
+        switch vault.status {
+        case .running: return vault.detail ?? "Working…"
+        case .failed: return vault.message ?? "Filing failed"
+        case .cancelled: return vault.message ?? "Cancelled"
+        case .skipped: return "Not filed"
+        case .waiting, .done:
+            if vaultDraft != nil { return "Draft ready to review" }
+            if canDraft { return settings.asks ? "Name the speakers, then file the note" : "Ready to file" }
+            return settings.asks ? "Waits for the transcript, then asks" : "Files when the transcript is ready"
+        }
     }
 
     // MARK: - Speakers
@@ -274,6 +422,18 @@ final class PipelineModel {
             if command != "speakers" { summaryUnseen = true }
             summarization.status = .done
             summarization.message = nil
+        case "vault_preview":
+            let category = e.string("category") ?? ""
+            vaultDraft = VaultDraft(
+                title: e.string("title") ?? "", category: category, tags: e.strings("tags").joined(separator: ", "),
+                body: e.string("body_markdown") ?? "", date: e.string("date") ?? "",
+                folders: e.stringMap("folders"), fallback: e.string("fallback_folder") ?? "Meetings Inbox",
+                vaultDir: e.string("vault_dir") ?? vaultSettings?.dir ?? "", names: names,
+                earlierNote: e.object("filed")?.string("path"), originalCategory: category)
+            // The config may have changed since the last doctor check: confirm_before_filing wins.
+            if vaultNext == .write, e.bool("confirm") == true { vaultNext = .review }
+        case "vault_note":
+            vaultNote = VaultNote(path: e.string("path") ?? "", needsReview: e.bool("needs_review") ?? false)
         case "session_moved":
             if let to = e.string("to") { sessionPath = to }
         case "error":
@@ -296,6 +456,8 @@ final class PipelineModel {
                 diarization.status = .failed; diarization.message = friendly
             case "summarization":
                 summarization.status = .failed; summarization.message = friendly
+            case "vault":
+                vault = Stage(status: .failed, message: friendly)
             default:
                 lastError = friendly
             }
@@ -434,6 +596,7 @@ final class PipelineModel {
         switch jobCommand {
         case "speakers": return "Renaming speakers…"
         case "resummarize": return "Summarizing again…"
+        case "file": return vaultNext == nil ? "Filing to Obsidian…" : "Drafting the Obsidian note…"
         default:
             if summarization.status == .running { return "Summarizing…" }
             if diarization.status == .running { return "Finding speakers…" }

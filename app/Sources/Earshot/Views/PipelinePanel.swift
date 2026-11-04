@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// After recording: Transcription → Diarization → Summarization, then the results.
+/// After recording: Transcription → Diarization → Summarization → Obsidian, then the results.
 struct PipelinePanel: View {
     let app: AppModel
     @ViewState private var tab = Tab.transcript
@@ -26,6 +26,7 @@ struct PipelinePanel: View {
                 transcriptionCard
                 diarizationCard
                 summarizationCard
+                vaultCard
             }
             .fixedSize(horizontal: false, vertical: true)
             results
@@ -33,6 +34,11 @@ struct PipelinePanel: View {
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .panel()
+        .sheet(isPresented: Binding(get: { pipeline.reviewingVault }, set: { pipeline.reviewingVault = $0 })) {
+            if let draft = pipeline.vaultDraft {
+                VaultReviewSheet(pipeline: pipeline, draft: draft)
+            }
+        }
         .onChange(of: tab) { _, new in if new == .summary { pipeline.summaryUnseen = false } }
         .onChange(of: pipeline.summaryUnseen) { _, unseen in if unseen && tab == .summary { pipeline.summaryUnseen = false } }
     }
@@ -99,6 +105,41 @@ struct PipelinePanel: View {
                 ProgressBar(fraction: pipeline.downloadFraction, indeterminate: pipeline.downloadFraction == nil)
             }
             Text(pipeline.summarizationFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(4).help(pipeline.summarizationFoot).monospacedDigit()
+        }
+    }
+
+    private var vaultCard: some View {
+        StageCard(title: "Obsidian", status: pipeline.vault.status, off: pipeline.vaultOff, accessory: {
+            if let settings = pipeline.vaultSettings, !pipeline.vaultOff {
+                Text(settings.asks ? "Asks first" : "Automatic").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                    .help(settings.asks ? "[obsidian] confirm_before_filing = true: you see the note before it's filed"
+                                        : "[obsidian] confirm_before_filing = false: filed as soon as the transcript is ready")
+            }
+        }) {
+            Text(pipeline.vaultSettings.map { "Claude · \($0.name) vault" } ?? "Claude · your vault")
+                .font(.system(size: 12)).foregroundStyle(Theme.ink3)
+                .opacity(pipeline.vaultOff ? 0.45 : 1)
+            if pipeline.vault.status == .running {
+                ProgressBar(fraction: nil, indeterminate: true)
+            }
+            Text(pipeline.vaultFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(4).help(pipeline.vaultFoot)
+            if let note = pipeline.vaultNote {
+                HStack(spacing: 8) {
+                    Button("Open in Obsidian") { note.open() }.controlSize(.small)
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: note.path)])
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Show the note in Finder")
+                }
+            } else if pipeline.canDraft, !pipeline.vaultOff, pipeline.vault.status != .running {
+                Button(pipeline.vault.status == .failed ? "Try Again" : pipeline.vaultDraft != nil ? "Review Note…" : "File to Obsidian…") {
+                    pipeline.fileToVault()
+                }
+                .controlSize(.small)
+            }
         }
     }
 

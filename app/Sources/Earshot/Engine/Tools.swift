@@ -66,6 +66,8 @@ struct DoctorReport: Sendable {
     /// `[summarization] backend` and model, e.g. ("claude", "sonnet") or ("local", "phi-4-mini").
     var summarizerBackend: String?
     var summarizerModel: String?
+    /// `[obsidian]`: whether recordings are filed into the vault, where, and whether to ask first.
+    var vault: VaultSettings?
 
     /// For the Summarization card.
     var summarizerLabel: String? {
@@ -182,6 +184,10 @@ enum Tools {
             if let w = check("whisper_model") {
                 report.whisperModel = w.string("model")
                 report.whisperCached = w.bool("cached") ?? true
+            }
+            if let v = check("obsidian") {
+                report.vault = .init(enabled: v.bool("enabled") ?? false, dir: v.string("vault_dir") ?? "",
+                                     exists: v.bool("vault_exists") ?? false, asks: v.bool("confirm") ?? true)
             }
             if let s = check("summarizer") {
                 report.summarizerBackend = s.string("backend")

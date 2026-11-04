@@ -8,7 +8,9 @@ import Observation
 final class AppModel {
     let recorder = RecorderModel()
     let pipeline = PipelineModel()
-    var doctor: DoctorReport?
+    var doctor: DoctorReport? {
+        didSet { pipeline.vaultSettings = doctor?.vault }
+    }
     var doctorError: String?
     var checking = false
     var dismissedProblems: Set<String> = []

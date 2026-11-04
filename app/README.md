@@ -15,6 +15,13 @@ The window opens sized to the screen and only the transcript and summary scroll.
 - **Processing:** after `saved`, `ownscribe process DIR --events-fd 3` with the template and the
   Diarization/Summarization switches. Speaker names run `ownscribe speakers DIR --set SPEAKER_00=Name`;
   a template change after a summary runs `ownscribe resummarize DIR --template T`. Cancel sends SIGTERM.
+- **Obsidian:** the fourth card files the recording into the vault, following `[obsidian]` in
+  config.toml. With `confirm_before_filing = true` (the default) it waits for you: **File to Obsidian…**
+  runs `ownscribe file DIR --preview` (Claude drafts the note with the speaker names entered so far) and
+  opens a sheet to edit the title, category (which picks the vault folder), tags and text; **File Note**
+  runs `ownscribe file DIR --write --edits DIR/vault-edits.json`. With `confirm_before_filing = false` it
+  drafts and writes right after processing, like the terminal pipeline. **Open in Obsidian** opens the
+  note. `enabled = false` or a missing `vault_dir` turns the card off.
 - **Setup check:** `ownscribe doctor --json` problems show as banners under the title bar.
 
 ## Install
