@@ -85,6 +85,7 @@ struct StripView: View {
 
     private var subtitle: String {
         if strip.state == "pending" { return "Starts with the recording" }
+        if strip.state == "lost" { return "Reconnecting…" }
         switch strip.id {
         case "sys": return recorder.appStrips.isEmpty ? "All apps" : "Other apps"
         case "mic":

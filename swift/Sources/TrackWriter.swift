@@ -54,8 +54,32 @@ final class TrackWriter: @unchecked Sendable {
     /// Host time of the last buffer that had any non-zero sample (0 if none yet).
     var lastSignalHostTime: UInt64 { lastSignal.get() }
 
+    /// When the source last handed over a buffer (arrival time, 0 if never). Whichever source
+    /// object feeds the track, this is what the session's watchdog checks.
+    var lastAppendHostTime: UInt64 { arrivals.get().last }
+
+    /// Watch for the source coming back: from now on, remember the first buffer's host time.
+    func armResume() { arrivals.update { $0.armed = true; $0.resumedAt = 0 } }
+
+    /// Host time of the first sample handed over since armResume(), or nil if none yet. This is
+    /// where the track's audio starts again.
+    var resumedHostTime: UInt64? {
+        let a = arrivals.get()
+        return !a.armed && a.resumedAt != 0 ? a.resumedAt : nil
+    }
+
+    private let arrivals = Locked<(last: UInt64, armed: Bool, resumedAt: UInt64)>((0, false, 0))
+
     /// Hand a buffer over. The writer takes ownership; don't reuse it afterwards.
     func append(_ buffer: AVAudioPCMBuffer, hostTime: UInt64) {
+        let now = mach_absolute_time()
+        arrivals.update { a in
+            a.last = now
+            if a.armed {
+                a.armed = false
+                a.resumedAt = hostTime
+            }
+        }
         queue.async { [self] in write(buffer, hostTime: hostTime) }
     }
 

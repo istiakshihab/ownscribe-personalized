@@ -23,6 +23,13 @@ split-out apps). Include and exclude taps built from the same process list parti
 nothing doubles when an app is split out and nothing is lost when it rejoins. ScreenCaptureKit stays
 only for the legacy `capture_mode = "picker"`.
 
+A tap's device runs only while a process it covers is playing. Tapping a running but silent app
+(Spotify, paused) or an app with no process at all creates the tap and the aggregate without error, but
+the IO callback is never called and `kAudioDevicePropertyDeviceIsRunning` stays 0; as soon as a covered
+process plays, buffers arrive at ~87/s. So "no buffers" cannot mean "dead tap" by itself: the session
+treats a tap as lost only when a covered process is playing and nothing arrives (see "Lost sources" in
+`engine-protocol.md`).
+
 An app is matched by bundle-ID prefix, so `com.microsoft.teams2` also covers
 `com.microsoft.teams2.helper` and `.modulehost`. Safari and other WebKit apps play through the shared
 `com.apple.WebKit.GPU` process and stay in "Other apps".

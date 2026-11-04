@@ -20,6 +20,20 @@ struct CaptureManifest: Codable {
     }
     struct GainChange: Codable { var t: Double; var source: String; var db: Double }
     struct MuteChange: Codable { var t: Double; var source: String; var muted: Bool }
+    /// A stretch where a source delivered nothing although it should have (its track holds
+    /// silence there). `to` is nil if the source never came back before the end.
+    struct Gap: Codable {
+        var source: String
+        var from: Double
+        var to: Double?
+
+        func encode(to encoder: Encoder) throws {  // write `"to": null`, not leave it out
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(source, forKey: .source)
+            try c.encode(from, forKey: .from)
+            try c.encode(to, forKey: .to)
+        }
+    }
 
     var version = 1
     var status = "recording"      // recording | saved | partial | failed
@@ -29,10 +43,11 @@ struct CaptureManifest: Codable {
     var tracks: [Track] = []
     var gainLog: [GainChange] = []
     var muteLog: [MuteChange] = []
+    var gaps: [Gap]?              // optional so capture.json files from before gaps still load
     var recording: String?
 
     enum CodingKeys: String, CodingKey {
-        case version, status, duration, tracks, recording
+        case version, status, duration, tracks, recording, gaps
         case sessionStart = "session_start"
         case sampleRate = "sample_rate"
         case gainLog = "gain_log"

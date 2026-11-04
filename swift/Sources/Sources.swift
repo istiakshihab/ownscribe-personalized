@@ -7,6 +7,19 @@ import Foundation
 protocol CaptureSource: AnyObject {
     func start() throws
     func stop()
+    /// Whether audio should be arriving right now, so a lack of it means the source died.
+    /// A mic or a test tone delivers buffers continuously, silence included. A process tap does
+    /// not: its device only runs while a tapped process is playing, so a tap of a silent app
+    /// legitimately delivers nothing.
+    func isAudioDue(_ processes: [AudioProcessInfo]) -> Bool
+    /// `debug_fail_source` (tests only): stop delivering audio without telling anyone, the way a
+    /// dead device or tap would.
+    func simulateFailure()
+}
+
+extension CaptureSource {
+    func isAudioDue(_ processes: [AudioProcessInfo]) -> Bool { true }
+    func simulateFailure() {}
 }
 
 // MARK: - Test tone (no permissions needed)
@@ -43,6 +56,8 @@ final class TestToneSource: CaptureSource {
         timer?.cancel()
         timer = nil
     }
+
+    func simulateFailure() { stop() }
 
     private func tick() {
         // Generate whatever wall-clock time has passed, so timestamps never drift.
@@ -185,17 +200,38 @@ final class ProcessTapSource: CaptureSource {
         }
     }
 
-    /// The default output device changed: rebuild the aggregate around the new clock.
-    func restartAggregate() {
+    /// The default output device changed: rebuild the aggregate around the new clock. A failure
+    /// (no output device left, say) leaves the tap dead; the caller reports it as lost.
+    func restartAggregate() throws {
         guard let instance = current else { return }
         stopAggregate(instance)
-        try? startAggregate(instance)
+        try startAggregate(instance)
     }
 
     func stop() {
         for instance in retiring + [current].compactMap({ $0 }) { destroy(instance) }
         retiring = []
         current = nil
+    }
+
+    /// True while a process this tap covers is playing: then its device runs and buffers must
+    /// arrive. Judged by bundle-ID prefix rather than the running instance's process list, so it
+    /// still answers after a failed rebuild left no instance. Our own process is never counted:
+    /// running a tap device can make it look like it is playing.
+    func isAudioDue(_ processes: [AudioProcessInfo]) -> Bool {
+        let own = getpid()
+        let matched = Set(processObjects(matching: prefixes, in: processes))
+        return processes.contains { p in
+            guard p.isPlaying, p.pid != own else { return false }
+            return mode == .include ? matched.contains(p.object) : !matched.contains(p.object)
+        }
+    }
+
+    /// Stop the tap's device in place, as if it had died; the instance is left for stop().
+    func simulateFailure() {
+        for instance in retiring + [current].compactMap({ $0 }) {
+            if let procID = instance.procID { AudioDeviceStop(instance.aggregateID, procID) }
+        }
     }
 
     // MARK: - Instances

@@ -536,4 +536,7 @@ class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
 
 extension MicCapture: CaptureSource {
     func start() throws { try start(outputPath: nil) }
+
+    /// Stop the capture session behind the recorder's back, as a dead device would.
+    func simulateFailure() { session.stopRunning() }
 }

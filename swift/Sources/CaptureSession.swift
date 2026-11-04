@@ -3,7 +3,7 @@ import AppKit
 import CoreAudio
 import Foundation
 
-let kHelperVersion = "2.0.0"
+let kHelperVersion = "2.1.0"  // 2.1: lost-source detection and recovery
 let kProtocolVersion = 1
 
 /// Session-mode capture (`capture --session DIR --control stdio`): any number of sources, each
@@ -19,6 +19,8 @@ final class CaptureSession {
         var excludeBundles: [String] = []
         var testTone = false
         var silenceTimeout: TimeInterval = 0
+        /// Accept `debug_fail_source` (tests only).
+        var debugCommands = false
     }
 
     final class Entry {
@@ -27,29 +29,58 @@ final class CaptureSession {
         var name: String
         let bundleID: String?
         let writer: TrackWriter
+        /// Builds a fresh source for this track: at start, on re-adding an app, and on recovery.
+        let factory: (TrackWriter) -> CaptureSource
         var source: CaptureSource?
         var gainDb: Double = 0
         var muted = false
         var state = "active"  // active | lost | removed
 
-        init(id: String, kind: String, name: String, bundleID: String?, writer: TrackWriter) {
+        // Watchdog (main queue). Host times.
+        /// Since when audio has been due without a break (nil while none is due, e.g. a silent app).
+        var dueSince: UInt64?
+        /// Missing audio before this moment doesn't count: the source was just (re)started, the
+        /// mic switched device, the output device changed or the Mac woke.
+        var watchFrom: UInt64 = 0
+        /// When the source was marked lost (identifies one loss for the delayed hand-over to "Other apps").
+        var lostAt: UInt64?
+        var nextRetry: UInt64 = 0
+        var retryDelay: Double = 2
+        var gapIndex: Int?
+        /// `debug_fail_source`: how many recovery attempts to fail on purpose.
+        var failRecoveries = 0
+
+        init(id: String, kind: String, name: String, bundleID: String?, writer: TrackWriter,
+             factory: @escaping (TrackWriter) -> CaptureSource) {
             self.id = id
             self.kind = kind
             self.name = name
             self.bundleID = bundleID
             self.writer = writer
+            self.factory = factory
         }
     }
+
+    /// Audio due but missing for this long (after any grace period) means the source is lost.
+    static let stallLimit = 3.0
+    /// Grace after a source (re)starts or reconfigures before missing audio counts.
+    static let startGrace = 2.0
+    static let maxRetryDelay = 15.0
 
     private let options: Options
     let sessionStart: UInt64
     private var entries: [String: Entry] = [:]
     private var order: [String] = []
     private var manifest: CaptureManifest
-    private var mic: MicCapture?
-    private var otherApps: ProcessTapSource?
-    private var appTaps: [String: ProcessTapSource] = [:]
+    private var micSelection: MicCapture.Selection
+    private var mic: MicCapture? { entries["mic"]?.source as? MicCapture }
+    private var otherApps: ProcessTapSource? { entries["sys"]?.source as? ProcessTapSource }
+    private var appTaps: [ProcessTapSource] {
+        entries.values.filter { $0.kind == "app" && $0.state != "removed" }.compactMap { $0.source as? ProcessTapSource }
+    }
     private var levelsTimer: DispatchSourceTimer?
+    private var watchdog: DispatchSourceTimer?
+    private var wakeObserver: NSObjectProtocol?
     private var seq = 0
     private var lastLoud: UInt64
     private var warnedSilence = false
@@ -65,6 +96,7 @@ final class CaptureSession {
 
     init(options: Options) {
         self.options = options
+        micSelection = options.micSelection
         sessionStart = mach_absolute_time()
         lastLoud = sessionStart
         let iso = ISO8601DateFormatter()
@@ -74,6 +106,11 @@ final class CaptureSession {
     }
 
     private var now: Double { HostTime.elapsed(from: sessionStart, to: mach_absolute_time()) }
+
+    /// Session time (seconds) of a host time, rounded to the millisecond.
+    private func sessionTime(_ hostTime: UInt64) -> Double {
+        (max(0, HostTime.elapsed(from: sessionStart, to: hostTime)) * 1000).rounded() / 1000
+    }
 
     // MARK: - Start
 
@@ -89,27 +126,34 @@ final class CaptureSession {
             return
         }
 
-        // System audio first: "Other apps" when any app has its own source.
-        if let sys = makeEntry(id: "sys", kind: options.testTone ? "test" : "system", name: "System audio", bundleID: nil) {
-            if options.testTone {
-                startSource(sys, TestToneSource(writer: sys.writer, frequency: 440))
-            } else {
-                let tap = ProcessTapSource(mode: .exclude, prefixes: options.apps + options.excludeBundles, writer: sys.writer)
-                otherApps = tap
-                startSource(sys, tap)
+        // System audio first: "Other apps" when any app has its own source. The exclude list is
+        // read when the tap is built, so a rebuilt tap still leaves out the split-out apps.
+        let sysFactory: (TrackWriter) -> CaptureSource = options.testTone
+            ? { TestToneSource(writer: $0, frequency: 440) }
+            : { [unowned self] in
+                ProcessTapSource(mode: .exclude, prefixes: self.activeAppPrefixes() + self.options.excludeBundles, writer: $0)
             }
+        if let sys = makeEntry(id: "sys", kind: options.testTone ? "test" : "system", name: "System audio", bundleID: nil,
+                               factory: sysFactory) {
+            startSource(sys)
         }
-        if options.mic, let micEntry = makeEntry(id: "mic", kind: options.testTone ? "test" : "mic", name: "Microphone", bundleID: nil) {
-            if options.testTone {
-                startSource(micEntry, TestToneSource(writer: micEntry.writer, frequency: 660, level: 0.15))
-            } else {
-                startMic(micEntry)
+        let micFactory: (TrackWriter) -> CaptureSource = options.testTone
+            ? { TestToneSource(writer: $0, frequency: 660, level: 0.15) }
+            : { [unowned self] writer in
+                let capture = MicCapture(selection: self.micSelection)
+                capture.sink = { buffer, hostTime in writer.append(buffer, hostTime: hostTime) }
+                capture.onReport = { [weak self] report in self?.handleMicReport(report) }
+                return capture
             }
+        if options.mic, let micEntry = makeEntry(id: "mic", kind: options.testTone ? "test" : "mic", name: "Microphone",
+                                                 bundleID: nil, factory: micFactory) {
+            startSource(micEntry)
         }
         for bundleID in options.apps { addApp(bundleID, commandID: nil) }
 
         installHardwareListener()
         startLevelsTimer()
+        startWatchdog()
         saveManifest()
         emitSources()
         if entries.values.allSatisfy({ $0.state != "active" }) {
@@ -118,14 +162,15 @@ final class CaptureSession {
         }
     }
 
-    private func makeEntry(id: String, kind: String, name: String, bundleID: String?) -> Entry? {
+    private func makeEntry(id: String, kind: String, name: String, bundleID: String?,
+                           factory: @escaping (TrackWriter) -> CaptureSource) -> Entry? {
         let file = "tracks/\(id.replacingOccurrences(of: ":", with: "-")).wav"
         do {
             let writer = try TrackWriter(id: id, url: options.dir.appendingPathComponent(file), sessionStart: sessionStart)
             writer.onWriteError = { message in
                 EventWriter.shared.emit("notice", ["level": "error", "code": "write_error", "source": id, "message": message])
             }
-            let entry = Entry(id: id, kind: kind, name: name, bundleID: bundleID, writer: writer)
+            let entry = Entry(id: id, kind: kind, name: name, bundleID: bundleID, writer: writer, factory: factory)
             entries[id] = entry
             order.append(id)
             manifest.tracks.append(.init(id: id, kind: kind, name: name, bundleID: bundleID, file: file))
@@ -136,33 +181,30 @@ final class CaptureSession {
         }
     }
 
-    /// Start a source; a failure marks only that source lost, the rest keep recording.
-    private func startSource(_ entry: Entry, _ source: CaptureSource) {
+    /// Start a fresh source for the track. A failure marks only that source lost (the rest keep
+    /// recording) and the watchdog keeps retrying it, so granting a permission mid-recording or
+    /// plugging a mic back in brings it back.
+    private func startSource(_ entry: Entry) {
+        let source = entry.factory(entry.writer)
+        entry.source = source
+        entry.dueSince = nil
+        entry.watchFrom = mach_absolute_time() + HostTime.ticks(seconds: Self.startGrace)
         do {
             try source.start()
-            entry.source = source
             entry.state = "active"
         } catch {
-            entry.state = "lost"
-            let code = (error as? TapError)?.code ?? "source_failed"
-            fail(code, "\(entry.name): \(error)", source: entry.id)
+            notice("error", Self.failureCode(error), "\(entry.name): \(error)", source: entry.id)
+            beginLoss(entry, from: mach_absolute_time())
         }
     }
 
-    private func startMic(_ entry: Entry) {
-        let capture = MicCapture(selection: options.micSelection)
-        capture.sink = { [writer = entry.writer] buffer, hostTime in writer.append(buffer, hostTime: hostTime) }
-        capture.onReport = { [weak self] report in self?.handleMicReport(report) }
-        do {
-            try capture.start(outputPath: nil)
-            mic = capture
-            entry.source = capture
-            entry.state = "active"
-        } catch {
-            entry.state = "lost"
-            let code = (error as? MicCapture.MicError).map { if case .permissionDenied = $0 { return "mic_permission_denied" } else { return "mic_failed" } } ?? "mic_failed"
-            fail(code, "Microphone: \(error)", source: "mic")
+    private static func failureCode(_ error: Error) -> String {
+        if let tap = error as? TapError { return tap.code }
+        if let mic = error as? MicCapture.MicError {
+            if case .permissionDenied = mic { return "mic_permission_denied" }
+            return "mic_failed"
         }
+        return "source_failed"
     }
 
     private func handleMicReport(_ report: MicCapture.Report) {
@@ -180,6 +222,8 @@ final class CaptureSession {
         case let .silent(message):
             EventWriter.shared.emit("notice", ["level": "warning", "code": "mic_silent", "message": message, "source": "mic"])
         case let .reconfigure(message):
+            // A device switch pauses the mic for a moment; don't take that for a dead mic.
+            entries["mic"]?.watchFrom = mach_absolute_time() + HostTime.ticks(seconds: Self.startGrace)
             EventWriter.shared.emit("notice", ["level": "info", "code": "mic_reconfigure", "message": message, "source": "mic"])
         }
     }
@@ -214,27 +258,39 @@ final class CaptureSession {
             ack()
             emitSources()
         case "set_mic":
-            guard let mic else { return reject("no_mic", "The microphone isn't being recorded") }
+            guard let micEntry = entries["mic"], !options.testTone else { return reject("no_mic", "The microphone isn't being recorded") }
             let spec = command["mic"] as? [String: Any] ?? [:]
             switch spec["mode"] as? String {
-            case "auto": mic.setSelection(.avoidBluetooth)
-            case "default": mic.setSelection(.systemDefault)
+            case "auto": micSelection = .avoidBluetooth
+            case "default": micSelection = .systemDefault
             case "device":
                 guard let uid = spec["uid"] as? String, !uid.isEmpty else { return reject("bad_args", "mic.uid is required") }
-                mic.setSelection(.uid(uid))
+                micSelection = .uid(uid)
             default: return reject("bad_args", "mic.mode must be auto, default or device")
+            }
+            if micEntry.state == "lost" {
+                attemptRecovery(micEntry)  // the new choice may be a mic that works
+            } else {
+                mic?.setSelection(micSelection)
             }
             ack()
         case "add_app":
             guard let bundleID = command["bundle_id"] as? String, !bundleID.isEmpty else { return reject("bad_args", "bundle_id is required") }
             addApp(bundleID, commandID: id)
         case "remove_app":
-            guard let bundleID = command["bundle_id"] as? String, let entry = entries["app:\(bundleID)"], entry.state == "active" else {
+            guard let bundleID = command["bundle_id"] as? String, let entry = entries["app:\(bundleID)"], entry.state != "removed" else {
                 return reject("unknown_source", "That app doesn't have its own source")
             }
             removeApp(entry)
             ack()
         case "ping":
+            ack()
+        case "debug_fail_source" where options.debugCommands:
+            guard let entry = entries[command["source"] as? String ?? ""], entry.state == "active" else {
+                return reject("unknown_source", "No such active source")
+            }
+            entry.failRecoveries = (command["fail_recoveries"] as? NSNumber)?.intValue ?? 0
+            entry.source?.simulateFailure()
             ack()
         case "stop":
             ack()
@@ -254,22 +310,27 @@ final class CaptureSession {
             }
         }
         if let existing = entries[id], existing.state == "active" { return reject("already_added", "\(existing.name) already has its own source") }
+        if let existing = entries[id], existing.state == "lost" {
+            attemptRecovery(existing)  // adding it again is a request to retry now
+            if let commandID { EventWriter.shared.emit("ack", ["id": commandID]) }
+            return
+        }
         let name = runningApps().first { $0.bundleID == bundleID }?.name ?? bundleID
-        guard let entry = entries[id] ?? makeEntry(id: id, kind: options.testTone ? "test" : "app", name: name, bundleID: bundleID) else {
+        let tone = 330 + Double(order.count) * 110
+        let factory: (TrackWriter) -> CaptureSource = options.testTone
+            ? { TestToneSource(writer: $0, frequency: tone, level: 0.2) }
+            : { ProcessTapSource(mode: .include, prefixes: [bundleID], writer: $0) }
+        guard let entry = entries[id] ?? makeEntry(id: id, kind: options.testTone ? "test" : "app", name: name,
+                                                   bundleID: bundleID, factory: factory) else {
             return reject("write_error", "Cannot create a track for \(name)")
         }
         // Split order: start the app's own source, then take it out of "Other apps". A few
-        // milliseconds of overlap beats a gap.
-        if options.testTone {
-            startSource(entry, TestToneSource(writer: entry.writer, frequency: 330 + Double(order.count) * 110, level: 0.2))
-        } else {
-            let tap = ProcessTapSource(mode: .include, prefixes: [bundleID], writer: entry.writer)
-            startSource(entry, tap)
-            if entry.state == "active" { appTaps[bundleID] = tap }
+        // milliseconds of overlap beats a gap. A source that fails to start shows as lost.
+        startSource(entry)
+        if entry.state == "active" {
+            otherApps?.update(prefixes: activeAppPrefixes() + options.excludeBundles)
+            renameSystem()
         }
-        guard entry.state == "active" else { return }
-        otherApps?.update(prefixes: activeAppPrefixes() + options.excludeBundles)
-        renameSystem()
         saveManifest()
         if let commandID { EventWriter.shared.emit("ack", ["id": commandID]) }
         emitSources()
@@ -277,16 +338,19 @@ final class CaptureSession {
 
     private func removeApp(_ entry: Entry) {
         // Rejoin order: give the app back to "Other apps" first, then stop its own source.
+        if entry.state == "lost" { endGap(entry, at: mach_absolute_time()) }
         entry.state = "removed"
+        entry.lostAt = nil
         otherApps?.update(prefixes: activeAppPrefixes() + options.excludeBundles)
         entry.source?.stop()
         entry.source = nil
-        if let bundleID = entry.bundleID { appTaps[bundleID] = nil }
         renameSystem()
         saveManifest()
         emitSources()
     }
 
+    /// Apps with their own working source. A lost app is left out, so "Other apps" records it
+    /// until its own source is back.
     private func activeAppPrefixes() -> [String] {
         entries.values.filter { $0.kind != "system" && $0.bundleID != nil && $0.state == "active" }.compactMap(\.bundleID)
     }
@@ -376,17 +440,168 @@ final class CaptureSession {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self else { return }
             refreshScheduled = false
-            for tap in appTaps.values { tap.update() }
+            for tap in appTaps { tap.update() }
             otherApps?.update()
         }
     }
 
     private func restartTaps() {
         guard !stopping else { return }
-        for tap in appTaps.values { tap.restartAggregate() }
-        otherApps?.restartAggregate()
+        let grace = mach_absolute_time() + HostTime.ticks(seconds: Self.startGrace)
+        for id in order {
+            guard let entry = entries[id], entry.state == "active", let tap = entry.source as? ProcessTapSource else { continue }
+            entry.watchFrom = grace
+            do {
+                try tap.restartAggregate()
+            } catch {
+                markLost(entry, since: mach_absolute_time(), why: ": couldn't re-attach to the new output device (\(error))")
+            }
+        }
         EventWriter.shared.emit("notice", ["level": "info", "code": "output_device_changed",
                                            "message": "Output device changed; system and app capture re-attached."])
+    }
+
+    // MARK: - Watchdog: sources that die mid-session
+
+    private func startWatchdog() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in self?.checkSources() }
+        timer.resume()
+        watchdog = timer
+        // Devices take a moment to come back after sleep.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let grace = mach_absolute_time() + HostTime.ticks(seconds: Self.startGrace + 1)
+            for entry in entries.values { entry.watchFrom = max(entry.watchFrom, grace) }
+        }
+    }
+
+    /// Twice a second: a source whose audio is due but hasn't arrived for `stallLimit` is lost; a
+    /// lost source is back on its first buffer, and is rebuilt with backoff (2, 4, 8, 15 s...)
+    /// while its audio is due. Its track holds silence for the gap, logged in capture.json.
+    private func checkSources() {
+        guard !stopping else { return }
+        let watched = order.compactMap { entries[$0] }.filter { $0.state == "active" || $0.state == "lost" }
+        guard !watched.isEmpty else { return }
+        // Only taps need the process list (who is playing); it costs a few HAL calls per process.
+        let processes = watched.contains { $0.source is ProcessTapSource } ? audioProcessObjects() : []
+        let t = mach_absolute_time()
+        for entry in watched {
+            let due = entry.source?.isAudioDue(processes) ?? true
+            entry.dueSince = due ? (entry.dueSince ?? t) : nil
+            let last = entry.writer.lastAppendHostTime
+            if entry.state == "active" {
+                guard let dueSince = entry.dueSince else { continue }
+                let since = max(dueSince, last, entry.watchFrom)
+                if t > since && HostTime.elapsed(from: since, to: t) >= Self.stallLimit {
+                    let why = entry.source is ProcessTapSource
+                        ? ": nothing recorded for \(Int(Self.stallLimit)) s while audio was playing"
+                        : " stopped delivering audio"
+                    // The gap starts at the last buffer (or when audio became due), not at the end
+                    // of a grace period.
+                    markLost(entry, since: max(last, dueSince), why: why)
+                }
+            } else if let resumed = entry.writer.resumedHostTime {
+                markRestored(entry, at: resumed)
+            } else if due && t >= entry.nextRetry {
+                attemptRecovery(entry)
+            }
+        }
+    }
+
+    /// Bookkeeping for a lost source: state, the gap in capture.json, the retry schedule.
+    private func beginLoss(_ entry: Entry, from hostTime: UInt64) {
+        let t = mach_absolute_time()
+        entry.state = "lost"
+        entry.lostAt = t
+        entry.writer.armResume()  // its first buffer from here on means it is back
+        entry.retryDelay = 2
+        entry.nextRetry = t + HostTime.ticks(seconds: entry.retryDelay)
+        var gaps = manifest.gaps ?? []
+        entry.gapIndex = gaps.count
+        gaps.append(.init(source: entry.id, from: sessionTime(hostTime), to: nil))
+        manifest.gaps = gaps
+    }
+
+    private func endGap(_ entry: Entry, at hostTime: UInt64) {
+        if let i = entry.gapIndex, var gaps = manifest.gaps, gaps.indices.contains(i) {
+            gaps[i].to = sessionTime(hostTime)
+            manifest.gaps = gaps
+        }
+        entry.gapIndex = nil
+    }
+
+    private func markLost(_ entry: Entry, since: UInt64, why: String) {
+        beginLoss(entry, from: since)
+        var message = "\(entry.name)\(why); reconnecting."
+        if entry.kind == "app" { message += " \"Other apps\" records it until then." }
+        notice("error", "source_lost", message, source: entry.id)
+        saveManifest()
+        emitSources()
+        attemptRecovery(entry)
+        guard entry.kind == "app", let lostAt = entry.lostAt else { return }
+        // Usually the rebuilt tap works at once. Give it a moment before handing the app to
+        // "Other apps": folding it in first would record it on both tracks until the next check.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, !stopping, entry.state == "lost", entry.lostAt == lostAt else { return }
+            if let resumed = entry.writer.resumedHostTime {
+                markRestored(entry, at: resumed)
+            } else {
+                otherApps?.update(prefixes: activeAppPrefixes() + options.excludeBundles)
+                renameSystem()
+                saveManifest()
+                emitSources()
+            }
+        }
+    }
+
+    private func markRestored(_ entry: Entry, at hostTime: UInt64) {
+        let gapStart = entry.gapIndex.flatMap { manifest.gaps?[$0].from }
+        endGap(entry, at: hostTime)
+        entry.state = "active"
+        entry.lostAt = nil
+        entry.dueSince = nil
+        entry.retryDelay = 2
+        var fields: [String: Any] = ["level": "info", "code": "source_restored", "source": entry.id]
+        if let gapStart {
+            let gap = (max(0, sessionTime(hostTime) - gapStart) * 10).rounded() / 10
+            fields["gap"] = gap
+            fields["message"] = "\(entry.name) is recording again after \(gap) s of silence."
+        } else {
+            fields["message"] = "\(entry.name) is recording again."
+        }
+        EventWriter.shared.emit("notice", fields)
+        if entry.kind == "app" {  // split it out of "Other apps" again, now that its own source works
+            otherApps?.update(prefixes: activeAppPrefixes() + options.excludeBundles)
+            renameSystem()
+        }
+        saveManifest()
+        emitSources()
+    }
+
+    /// Throw the old source away and start a fresh one. Success shows up as buffers, which
+    /// checkSources() takes as the source being back.
+    private func attemptRecovery(_ entry: Entry) {
+        let t = mach_absolute_time()
+        entry.nextRetry = t + HostTime.ticks(seconds: entry.retryDelay)
+        entry.retryDelay = min(entry.retryDelay * 2, Self.maxRetryDelay)
+        entry.source?.stop()
+        let source = entry.factory(entry.writer)
+        entry.source = source
+        entry.watchFrom = t
+        do {
+            if entry.failRecoveries > 0 {
+                entry.failRecoveries -= 1
+                throw TapError(code: "simulated", description: "simulated failure (debug_fail_source)")
+            }
+            try source.start()
+            fputs("\(entry.id): restarted the source\n", stderr)
+        } catch {
+            fputs("\(entry.id): restart failed, retrying in \(Int(entry.retryDelay / 2)) s: \(error)\n", stderr)
+        }
     }
 
     // MARK: - Stop
@@ -397,6 +612,10 @@ final class CaptureSession {
         EventWriter.shared.emit("stopping", ["reason": reason])
         levelsTimer?.cancel()
         levelsTimer = nil
+        watchdog?.cancel()
+        watchdog = nil
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        wakeObserver = nil
         removeHardwareListener()
         for entry in entries.values {
             entry.source?.stop()
@@ -407,7 +626,9 @@ final class CaptureSession {
         for entry in entries.values { entry.writer.finish(padTo: frames) }
         manifest.duration = (duration * 1000).rounded() / 1000
 
-        var status = hadFailure ? "partial" : "ok"
+        // A source still lost at the end leaves its track silent from the gap on.
+        let lostAtEnd = entries.values.contains { $0.state == "lost" }
+        var status = hadFailure || lostAtEnd ? "partial" : "ok"
         do {
             let result = try mergeSession(at: options.dir, manifest: manifest)
             if let recording = result.recording {
@@ -435,9 +656,14 @@ final class CaptureSession {
 
     // MARK: - Helpers
 
+    /// An error that makes the session partial whatever happens next (sources have their own state).
     private func fail(_ code: String, _ message: String, source: String? = nil) {
         hadFailure = true
-        var fields: [String: Any] = ["level": "error", "code": code, "message": message]
+        notice("error", code, message, source: source)
+    }
+
+    private func notice(_ level: String, _ code: String, _ message: String, source: String? = nil) {
+        var fields: [String: Any] = ["level": level, "code": code, "message": message]
         if let source { fields["source"] = source }
         EventWriter.shared.emit("notice", fields)
     }
@@ -519,6 +745,7 @@ func runSessionCapture(_ args: [String]) -> Never {
             }
             options.silenceTimeout = seconds
         case "--capture-mode-all": break  // session mode always captures all system audio
+        case "--debug-commands": options.debugCommands = true  // tests only; not in the usage text
         default:
             fputs("Unknown option for session capture: \(args[i])\n", stderr)
             exit(64)

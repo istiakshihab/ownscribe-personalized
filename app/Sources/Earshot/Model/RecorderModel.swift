@@ -301,6 +301,10 @@ final class RecorderModel {
             notices.removeAll { $0.code == "mic_silent" || $0.code == "mic_builtin_silent_fallback" }
             return
         }
+        if notice.code == "source_restored" {  // the helper reconnected a source it had lost
+            notices.removeAll { $0.code == "source_lost" && $0.source == notice.source }
+            return
+        }
         notices.removeAll { $0.id == notice.id }
         notices.append(notice)
     }

@@ -100,6 +100,10 @@ final class AppModel {
         for n in recorder.notices where n.isProblem && n.source == "mic" && n.code == "mic_permission_denied" {
             out.append(.init(id: "notice-\(n.id)", text: n.message, kind: .error, action: .privacy(n.code)))
         }
+        // Other mic notices show on the strip; a mic that died mid-recording is worth a banner.
+        for n in recorder.notices where n.source == "mic" && n.code == "source_lost" {
+            out.append(.init(id: "notice-\(n.id)", text: n.message, kind: .error, action: .dismiss))
+        }
         return out
     }
 

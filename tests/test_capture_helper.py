@@ -55,6 +55,25 @@ class Session:
         self._reader.join(timeout=5)
         return code
 
+    def wait_for(self, ev: str, timeout: float = 15, **fields) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for e in list(self.events):
+                if e["ev"] == ev and all(e.get(k) == v for k, v in fields.items()):
+                    return e
+            time.sleep(0.1)
+        raise AssertionError(f"no {ev} {fields} within {timeout} s")
+
+    def states(self, source: str) -> list[str]:
+        """The source's state in each `sources` snapshot, with repeats collapsed."""
+        out: list[str] = []
+        for e in self.events:
+            if e["ev"] == "sources":
+                state = next((x["state"] for x in e["list"] if x["id"] == source), None)
+                if state and (not out or out[-1] != state):
+                    out.append(state)
+        return out
+
 
 def test_protocol_round_trip_and_aligned_tracks(tmp_path):
     s = Session(tmp_path, "--mic")
@@ -118,3 +137,49 @@ def test_merge_recovers_a_killed_session(tmp_path):
     assert merge.returncode == 0, stderr
     assert sf.info(str(tmp_path / "recording.wav")).duration > 0.5
     assert json.loads((tmp_path / "capture.json").read_text())["status"] == "saved"
+
+
+def test_dead_source_is_detected_rebuilt_and_logged_as_a_gap(tmp_path):
+    s = Session(tmp_path, "--mic", "--debug-commands")
+    time.sleep(0.5)
+    s.send(cmd="debug_fail_source", source="sys", fail_recoveries=1, id=1)  # first rebuild fails too
+    lost = s.wait_for("notice", code="source_lost", source="sys")
+    restored = s.wait_for("notice", code="source_restored", source="sys")
+    s.send(cmd="stop")
+    assert s.finish() == 0  # it came back, so the recording is complete apart from the gap
+
+    assert lost["level"] == "error" and restored["t"] - lost["t"] >= 1.5  # the second rebuild worked
+    assert s.states("sys") == ["active", "lost", "active"]
+    assert s.states("mic") == ["active"]  # the other source never noticed
+    manifest = json.loads((tmp_path / "capture.json").read_text())
+    assert manifest["status"] == "saved"
+    [gap] = manifest["gaps"]
+    assert gap["source"] == "sys" and 0.4 < gap["from"] < 1.0 and gap["to"] > gap["from"] + 3
+    assert abs(restored["gap"] - (gap["to"] - gap["from"])) < 0.2
+
+    sys_track, sr = sf.read(str(tmp_path / "tracks/sys.wav"), dtype="float32")
+    assert np.all(sys_track[int((gap["from"] + 0.1) * sr):int((gap["to"] - 0.1) * sr)] == 0)
+    assert np.any(sys_track[int(gap["to"] * sr):] != 0)  # audio again after the gap
+
+
+def test_source_still_lost_at_stop_makes_the_session_partial(tmp_path):
+    s = Session(tmp_path, "--mic", "--debug-commands")
+    time.sleep(0.5)
+    s.send(cmd="debug_fail_source", source="mic", fail_recoveries=99, id=1)
+    s.wait_for("notice", code="source_lost", source="mic")
+    s.send(cmd="stop")
+    assert s.finish() == 2
+    assert s.events[-1]["status"] == "partial" and s.events[-1]["recording"]
+    manifest = json.loads((tmp_path / "capture.json").read_text())
+    assert manifest["status"] == "partial"
+    assert [(g["source"], g["to"]) for g in manifest["gaps"]] == [("mic", None)]
+
+
+def test_debug_commands_need_the_flag(tmp_path):
+    s = Session(tmp_path)
+    time.sleep(0.4)
+    s.send(cmd="debug_fail_source", source="sys", id=1)
+    s.send(cmd="stop")
+    assert s.finish() == 0
+    assert [e["code"] for e in s.events if e["ev"] == "error"] == ["unknown_command"]
+    assert "gaps" not in json.loads((tmp_path / "capture.json").read_text())

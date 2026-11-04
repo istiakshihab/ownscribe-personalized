@@ -7,6 +7,9 @@ Lets a GUI client be built and tested without real capture, permissions or model
     mock_engine.py process SESSION [--events-fd 3]      # like: ownscribe process SESSION --events-fd 3
         [--template meeting|lecture|brief] [--no-diarize] [--no-summarize] [--speed 1.0]
 
+To see a source die mid-recording, set OWNSCRIBE_MOCK_LOSE to `SOURCE@AT+FOR` items (seconds; FOR `inf` never
+recovers), e.g. `mic@8+4,app:us.zoom.xos@15+inf`, or send `debug_fail_source` like the real helper's tests do.
+
 It also accepts the real tools' command lines, so a client can point both its `ownscribe` command and
 its capture helper at this script (`mock_engine.py [--speed N] <command> ...`):
 
@@ -56,6 +59,12 @@ DEVICES = [
 ]
 
 
+def _later(delay: float, fn, *args) -> None:
+    timer = threading.Timer(delay, fn, args)
+    timer.daemon = True  # never keeps the mock alive after `saved`
+    timer.start()
+
+
 class MockHelper:
     def __init__(self, session: str | None, mic: bool = True, mic_device: str | None = None,
                  apps: tuple = ()) -> None:
@@ -74,6 +83,44 @@ class MockHelper:
         self.initial_apps = [a for a in apps if a in APPS]
         self.mic_mode = "auto"
         self.seq = 0
+        self.gaps: list[dict] = []
+
+    def lose(self, sid: str, duration: float) -> None:
+        """A source dies; it comes back after `duration` seconds (never if inf), like the real watchdog."""
+        with self.lock:
+            src = self.sources.get(sid)
+            if src is None or src["state"] != "active":
+                return
+            src["state"] = "lost"
+            gap = {"source": sid, "from": self.t(), "to": None}
+            self.gaps.append(gap)
+        why = (" stopped delivering audio" if src["kind"] == "mic"
+               else ": nothing recorded for 3 s while audio was playing")
+        self.emit("notice", level="error", code="source_lost", source=sid, message=f"{src['name']}{why}; reconnecting.")
+        self.emit_sources()
+        if math.isinf(duration):
+            return
+
+        def back() -> None:
+            with self.lock:
+                if src["state"] != "lost" or self.stop_reason:
+                    return
+                src["state"] = "active"
+                gap["to"] = self.t()
+            seconds = round(gap["to"] - gap["from"], 1)
+            self.emit("notice", level="info", code="source_restored", source=sid, gap=seconds,
+                      message=f"{src['name']} is recording again after {seconds} s of silence.")
+            self.emit_sources()
+        _later(duration, back)
+
+    def schedule_losses(self, spec: str) -> None:
+        for item in filter(None, (x.strip() for x in spec.split(","))):
+            try:
+                sid, rest = item.split("@", 1)
+                at, duration = rest.split("+", 1)
+                _later(float(at), self.lose, sid, float(duration))
+            except ValueError:
+                print(f"OWNSCRIBE_MOCK_LOSE: ignoring {item!r} (want SOURCE@AT+FOR)", file=sys.stderr)
 
     def t(self) -> float:
         return round(time.monotonic() - self.t0, 3)
@@ -189,6 +236,12 @@ class MockHelper:
             self.emit_sources()
         elif cmd == "ping":
             ack()
+        elif cmd == "debug_fail_source":
+            if self.sources.get(msg.get("source"), {}).get("state") != "active":
+                return error("unknown_source", "No such active source")
+            ack()
+            retries = int(msg.get("fail_recoveries") or 0)
+            self.lose(msg["source"], 3.5 + 2 * retries if retries < 99 else math.inf)
         elif cmd == "stop":
             ack()
             self.stop_reason = "command"
@@ -218,13 +271,15 @@ class MockHelper:
         if "mic" in self.sources:
             self.emit_mic(self.mic_device)
         threading.Thread(target=self.stdin_loop, daemon=True).start()
+        self.schedule_losses(os.environ.get("OWNSCRIBE_MOCK_LOSE", ""))
         self.levels_loop()
         self.emit("stopping", reason=self.stop_reason)
         recording = str(Path(self.session) / "recording.wav") if self.session else None
         with self.lock:
             tracks = [f"tracks/{s['id'].replace(':', '-')}.wav" for s in self.sources.values()]
-        self.emit("saved", status="ok", recording=recording, tracks=tracks, duration=self.t())
-        return 0
+            lost = any(s["state"] == "lost" for s in self.sources.values())
+        self.emit("saved", status="partial" if lost else "ok", recording=recording, tracks=tracks, duration=self.t())
+        return 2 if lost else 0
 
 
 # ---------------------------------------------------------------- job (processing) side

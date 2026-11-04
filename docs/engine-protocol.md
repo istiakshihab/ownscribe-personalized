@@ -62,6 +62,7 @@ jobs report this with a `session_moved` event and update `session.json`.
   ],
   "gain_log": [{"t": 12.5, "source": "mic", "db": -6.0}],
   "mute_log": [{"t": 30.0, "source": "sys", "muted": true}],
+  "gaps": [{"source": "mic", "from": 61.2, "to": 64.8}],   // absent if no source was ever lost
   "recording": "recording.wav"      // set once merged
 }
 ```
@@ -70,6 +71,8 @@ Every track file starts at the session start and is padded with silence wherever
 (not yet added, removed, device switching), so tracks line up sample for sample. Mutes are applied
 at capture (muted audio never reaches disk); gain is applied when mixing, from `gain_log`.
 `ownscribe-audio merge --session <path>` rebuilds `recording.wav` from `capture.json` (crash recovery).
+`gaps` lists the stretches where a source was lost (see "Lost sources" below) and its track holds silence;
+`to` is `null` if it never came back.
 
 ### session.json (ownscribe)
 
@@ -127,6 +130,7 @@ Every command may carry an `"id"`; the helper answers it with `ack` or `error`.
 | `remove_app` | `bundle_id` | fold the app back into "Other apps" (its track pads with silence) |
 | `stop` | — | stop, merge, emit `saved`, exit |
 | `ping` | — | answered with `ack` |
+| `debug_fail_source` | `source`, `fail_recoveries`? | tests only, needs `--debug-commands`: the source stops delivering as if it died, and the next N recovery attempts fail |
 
 Closing stdin (the GUI quit or crashed) is treated as `stop`.
 
@@ -153,10 +157,34 @@ Notice codes:
 - system and apps: `system_audio_permission_denied`, `tap_failed`, `no_output_device`, `output_device_changed`
 - session: `source_failed`, `no_sources`, `session_dir_failed`, `silence_timeout_soon` (with `seconds_left`),
   `write_error`, `merge_failed`
+- lost sources: `source_lost` (error), `source_restored` (info, with `gap` in seconds)
 
-Messages are human-readable English; clients should key behavior off `code`. A source that fails to start
-is reported with `level: "error"` and `state: "lost"` while the others keep recording; the final `saved`
-then has `status: "partial"`. (Detecting a tap that dies mid-session is not implemented yet.)
+Messages are human-readable English; clients should key behavior off `code`.
+
+### Lost sources
+
+A source that fails to start, or dies while recording, gets `state: "lost"` in `sources` while the others
+keep recording, and the helper keeps trying to bring it back. Its track holds silence for the gap, which
+`capture.json` logs under `gaps`.
+
+- **Detection.** A mic delivers buffers continuously (silence included), so 3 s without any means it died.
+  A process tap is different: its device runs only while a tapped process is playing, so a tap of a silent
+  app delivering nothing is normal. A tap is lost when a process it covers is playing
+  (`kAudioProcessPropertyIsRunningOutput`) but nothing has arrived for 3 s. Missing audio doesn't count for
+  2 s after a source (re)starts, the mic switches device, the output device changes, or the Mac wakes.
+- **Events.** A start failure is reported with its own code (`system_audio_permission_denied`, `mic_failed`, ...);
+  a mid-session death with `source_lost`. Both come with a `sources` snapshot showing `lost`.
+- **Recovery.** The source is rebuilt from scratch at once, then after 2, 4, 8 and every 15 s, but only
+  while its audio is due (a lost tap of an app that went quiet is not retried until it plays again). Its
+  first buffer afterwards makes it `active` again, with a `source_restored` notice.
+- **Apps.** While an app's own source is lost, "Other apps" records it, so its audio is not lost too. The
+  app is handed over 0.2 s after the first rebuild if that didn't bring it back, and is split out again once
+  its own source works.
+- **Clients.** Re-sending `add_app` for a lost app retries at once; `remove_app` drops it; `set_mic` on a lost
+  mic retries with the new choice.
+
+`saved` has `status: "partial"` (exit code 2) if a source is still lost when the recording stops. A source
+that came back leaves only its gap in `capture.json`.
 
 ### Listings
 
