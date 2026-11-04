@@ -38,7 +38,7 @@ enum JSONLine {
     }
 }
 
-/// Appends child stderr (and app notes) to ~/Library/Logs/ownscribe/app.log.
+/// Appends child stderr (and app notes) to ~/Library/Logs/Earshot/Earshot.log.
 final class AppLog: @unchecked Sendable {
     static let shared = AppLog()
     let url: URL
@@ -46,9 +46,9 @@ final class AppLog: @unchecked Sendable {
     private var handle: FileHandle?
 
     private init() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/ownscribe")
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Earshot")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        url = dir.appendingPathComponent("app.log")
+        url = dir.appendingPathComponent("Earshot.log")
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }

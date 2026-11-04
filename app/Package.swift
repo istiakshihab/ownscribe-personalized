@@ -1,14 +1,14 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// The ownscribe recorder app. Built into ownscribe.app by build.sh (no Xcode project needed).
+// Earshot, the recorder app for ownscribe. Built into Earshot.app by build.sh (no Xcode project needed).
 let package = Package(
-    name: "OwnscribeApp",
+    name: "Earshot",
     platforms: [.macOS(.v26)],
     targets: [
         .executableTarget(
-            name: "OwnscribeApp",
-            path: "Sources/OwnscribeApp",
+            name: "Earshot",
+            path: "Sources/Earshot",
             swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]

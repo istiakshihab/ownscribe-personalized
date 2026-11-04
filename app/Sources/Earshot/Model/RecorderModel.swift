@@ -225,7 +225,7 @@ final class RecorderModel {
             let wasCapturing = phase != .idle
             phase = .idle
             if wasCapturing {
-                lastError = "The capture helper stopped unexpectedly (exit \(code)). Its log is in ~/Library/Logs/ownscribe/app.log."
+                lastError = "The capture helper stopped unexpectedly (exit \(code)). Its log is in ~/Library/Logs/Earshot/Earshot.log."
                 if let sessionPath, FileManager.default.fileExists(atPath: sessionPath + "/capture.json") {
                     recoverablePath = sessionPath
                 }

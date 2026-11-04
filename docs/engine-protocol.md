@@ -1,6 +1,6 @@
 # ownscribe engine protocol (v1)
 
-This is the contract between a GUI client (the planned SwiftUI app) and ownscribe's backend.
+This is the contract between a GUI client (Earshot, the SwiftUI app in `app/`) and ownscribe's backend.
 Everything here is JSON over pipes; there is no network listener.
 
 ```

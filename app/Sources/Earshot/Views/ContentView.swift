@@ -31,7 +31,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
         // Frosted window background: the desktop shows through, blurred, as in System Settings.
         .containerBackground(for: .window) { FrostedBackground() }
-        .navigationTitle("ownscribe")
+        .navigationTitle("Earshot")
         .navigationSubtitle(app.statusLine)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

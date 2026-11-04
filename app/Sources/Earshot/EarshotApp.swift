@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct OwnscribeApp: App {
+struct EarshotApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @ViewState private var model: AppModel
 
@@ -16,7 +16,7 @@ struct OwnscribeApp: App {
     }
 
     var body: some Scene {
-        Window("ownscribe", id: "main") {
+        Window("Earshot", id: "main") {
             ContentView(app: model)
         }
         // First launch: as wide as the layout likes and as tall as the screen allows, so nothing

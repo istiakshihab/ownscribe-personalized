@@ -30,7 +30,7 @@ enum HFConfig {
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let updated = setting(token, in: existing)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let tmp = url.deletingLastPathComponent().appendingPathComponent(".config.toml.ownscribe-app.tmp")
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".config.toml.earshot.tmp")
         try Data(updated.utf8).write(to: tmp)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
         if FileManager.default.fileExists(atPath: url.path) {

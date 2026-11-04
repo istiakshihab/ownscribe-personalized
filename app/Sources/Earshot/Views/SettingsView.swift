@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// ownscribe ▸ Settings…: the backend commands, and the Hugging Face token diarization needs.
+/// Earshot ▸ Settings…: the backend commands, and the Hugging Face token diarization needs.
 struct SettingsView: View {
     let app: AppModel
     @AppStorage(Prefs.settingsTab) private var tab = "backend"

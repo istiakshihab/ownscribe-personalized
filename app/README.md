@@ -1,13 +1,17 @@
-# ownscribe recorder (macOS app)
+<img src="Resources/Logo.png" width="128" alt="Earshot icon">
+
+# Earshot
+
+The macOS recorder app for ownscribe.
 
 A native SwiftUI front end for ownscribe (macOS 26+) with a standard macOS look: a frosted window
 background (as in System Settings) behind solid grouped sections, and native menus, buttons and sliders.
 The window opens sized to the screen and only the transcript and summary scroll. It drives the backend exactly as [docs/engine-protocol.md](../docs/engine-protocol.md) describes:
 
 - **Recording:** `ownscribe session new --json` makes the session folder, then the app spawns
-  `ownscribe-audio capture --session DIR --control stdio --mic --mic-auto|--mic-device UID --exclude-bundle com.ownscribe.app`,
+  `ownscribe-audio capture --session DIR --control stdio --mic --mic-auto|--mic-device UID --exclude-bundle com.ownscribe.earshot`,
   sends mixer commands on its stdin and reads events (levels, sources, mic, notices, saved) from its stdout.
-  Helper stderr goes to `~/Library/Logs/ownscribe/app.log`.
+  Helper stderr goes to `~/Library/Logs/Earshot/Earshot.log`.
 - **Processing:** after `saved`, `ownscribe process DIR --events-fd 3` with the template and the
   Diarization/Summarization switches. Speaker names run `ownscribe speakers DIR --set SPEAKER_00=Name`;
   a template change after a summary runs `ownscribe resummarize DIR --template T`. Cancel sends SIGTERM.
@@ -19,18 +23,18 @@ Needs only the Command Line Tools (no Xcode project):
 
 ```bash
 bash swift/build.sh            # the capture helper, bin/ownscribe-audio
-bash app/build.sh              # app/build/ownscribe.app (release, ad-hoc signed)
-open app/build/ownscribe.app
+bash app/build.sh              # app/build/Earshot.app (release, ad-hoc signed)
+open app/build/Earshot.app
 ```
 
 `bash app/build.sh debug --open` builds a debug app and launches it.
 
-The first recording asks for **Microphone** and **System Audio Recording** access for "ownscribe"
+The first recording asks for **Microphone** and **System Audio Recording** access for "Earshot"
 (the app is responsible for the helper it spawns). The signature is ad-hoc, so a rebuild may ask again.
 
 ## Settings
 
-ownscribe ▸ Settings… has two tabs.
+Earshot ▸ Settings… has two tabs.
 
 **Backend** holds the two commands the app runs:
 
@@ -58,7 +62,7 @@ the jobs it starts: the saved token is what diarization uses, however the app wa
 
 ## Layout
 
-- `Sources/OwnscribeApp/Engine/` — `ChildProcess` (posix_spawn with an extra fd 3 for job events),
+- `Sources/Earshot/Engine/` — `ChildProcess` (posix_spawn with an extra fd 3 for job events),
   `HelperConnection`, `JobProcess`, one-shot `Tools` (listings, `session new`, `doctor`, `templates`),
   `HFConfig` (the token in config.toml, and the token test).
 - `Model/` — `RecorderModel` (helper lifecycle, mixer, meters, mic, notices), `PipelineModel`
@@ -74,3 +78,16 @@ Notes:
   with only the Command Line Tools installed.
 - Per-app capture can't split out Safari (it plays through the shared WebKit GPU process), so the
   Add source list shows it disabled.
+
+## Icon
+
+A red recording dot with three sound arcs reaching out from it, coloured like the app's sources
+(orange mic, blue system audio, green apps). `Resources/make-icon.swift` draws it and writes
+`Resources/AppIcon.icns` and `Resources/Logo.png`; rerun it after changing the drawing:
+
+```bash
+swift app/Resources/make-icon.swift
+```
+
+The artwork is full-bleed; macOS masks it to the app-icon shape.
+
