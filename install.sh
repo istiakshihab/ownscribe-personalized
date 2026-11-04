@@ -179,9 +179,18 @@ find_or_install_uv() {
         uv="$HOME/.local/bin/uv"
     else
         step "Installing uv, the Python package manager, into ~/.local/bin" >&2
-        if ! curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --quiet --no-modify-path </dev/null >&2; then
+        # Download first, then run: piping curl into `sh </dev/null` would hand sh an empty script.
+        local installer
+        installer="$(mktemp -t uv-install)"
+        if ! curl -LsSf https://astral.sh/uv/install.sh -o "$installer"; then
+            rm -f "$installer"
+            die "Couldn't download uv's installer from astral.sh. Check the connection and run this again."
+        fi
+        if ! sh "$installer" --quiet --no-modify-path </dev/null >&2; then
+            rm -f "$installer"
             die "Installing uv failed. See https://docs.astral.sh/uv/getting-started/installation/"
         fi
+        rm -f "$installer"
         uv="$HOME/.local/bin/uv"
         if [ ! -x "$uv" ]; then die "uv was installed but isn't at $uv."; fi
     fi
