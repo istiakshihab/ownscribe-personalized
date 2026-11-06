@@ -16,7 +16,7 @@ jobs:
       - run: uv run ruff check src/ tests/
 
   test:
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       CI: "true"
     steps:
