@@ -154,7 +154,9 @@ Every event has `"ev"` and `"t"` (seconds since session start).
 Notice codes:
 - mic: `mic_bluetooth`, `mic_silent`, `mic_signal_back`, `mic_builtin_silent_fallback`, `mic_reconfigure`,
   `mic_permission_denied`, `mic_failed`
-- system and apps: `system_audio_permission_denied`, `tap_failed`, `no_output_device`, `output_device_changed`
+- system and apps: `system_audio_permission_denied`, `tap_failed`, `no_output_device`, `output_device_changed`,
+  `tap_rate_changed` (info: the output device's sample rate changed, e.g. a headset switching to hands-free for
+  a call, or the helper caught buffers arriving at another rate than it read them at and corrected it)
 - session: `source_failed`, `no_sources`, `session_dir_failed`, `silence_timeout_soon` (with `seconds_left`),
   `write_error`, `merge_failed`
 - lost sources: `source_lost` (error), `source_restored` (info, with `gap` in seconds)

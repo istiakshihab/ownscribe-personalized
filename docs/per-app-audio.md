@@ -30,6 +30,17 @@ process plays, buffers arrive at ~87/s. So "no buffers" cannot mean "dead tap" b
 treats a tap as lost only when a covered process is playing and nothing arrives (see "Lost sources" in
 `engine-protocol.md`).
 
+**Sample rate.** A tap's buffers arrive at the aggregate's nominal rate, which is the output device's: 44.1 kHz
+for most Bluetooth headphones, 16 kHz while a call uses a headset's mic (hands-free mode). `kAudioTapPropertyFormat`
+and the aggregate's input-stream virtual format both still report 48 kHz. Measured on 2026-11-05 with WH-1000XM6
+output at 44.1 kHz: tap format 48000, aggregate nominal 44100, IOProc 44,100 frames/s by data size and by
+`mSampleTime`. So the helper reads buffers at `kAudioDevicePropertyNominalSampleRate` of the aggregate, follows that
+property when it changes, and once a second compares the device's sample clock (`mSampleTime` against
+`mHostTime`) with the rate it reads at, snapping to the measured standard rate if they disagree. Helpers before
+2.2 read every buffer as 48 kHz: a 16 kHz call came out 3x fast in 20 ms bursts with 40 ms of silence between, and
+44.1 kHz output 9% fast with a gap every ~0.4 s. No audio was lost in those recordings;
+`scripts/repair_tap_rate.py SESSION` stretches it back into a new session folder.
+
 An app is matched by bundle-ID prefix, so `com.microsoft.teams2` also covers
 `com.microsoft.teams2.helper` and `.modulehost`. Safari and other WebKit apps play through the shared
 `com.apple.WebKit.GPU` process and stay in "Other apps".

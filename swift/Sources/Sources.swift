@@ -140,6 +140,11 @@ struct TapError: Error, CustomStringConvertible {
 /// (`exclude`, used for "Other apps"). A tap lives in a private aggregate device whose clock is
 /// the default output device; buffers are copied off the real-time thread and handed to the writer.
 ///
+/// Buffers arrive at the aggregate's nominal rate, which is the output device's: 44.1 kHz for most
+/// Bluetooth headphones, 16 kHz while a call uses a headset mic. kAudioTapPropertyFormat (and the
+/// aggregate's input-stream format) still say 48 kHz, so the rate is taken from the device, followed
+/// when it changes, and checked against the device's own sample clock.
+///
 /// Core Audio refuses to change a running tap's process list (kAudioTapPropertyDescription returns
 /// '!hog'), so a change builds a replacement tap first. Each tap instance tags its buffers with a
 /// generation; the replacement takes over the track on its first buffer and only then are the old
@@ -147,11 +152,27 @@ struct TapError: Error, CustomStringConvertible {
 final class ProcessTapSource: CaptureSource {
     enum Mode { case include, exclude }
 
+    /// The device's sample clock against the host clock over the IO thread's current stretch of
+    /// back-to-back callbacks (a pause starts a new one, so idle time never counts).
+    struct Clock {
+        var startSample = 0.0
+        var startHost: UInt64 = 0
+        var lastSample = 0.0
+        var lastHost: UInt64 = 0
+    }
+
     private final class Instance {
         var tapID = AudioObjectID(kAudioObjectUnknown)
         var aggregateID = AudioObjectID(kAudioObjectUnknown)
         var procID: AudioDeviceIOProcID?
-        var format: AVAudioFormat?
+        /// The tap's own description: channels and sample type. Its sample rate is not to be trusted.
+        var tapFormat = AudioStreamBasicDescription()
+        /// What buffers are read as: the tap's layout at the rate the device really runs at.
+        let ioFormat = Locked<AVAudioFormat?>(nil)
+        let clock = Locked(Clock())
+        var rateListener: AudioObjectPropertyListenerBlock?
+        /// A rate change the listener adopted, for the next checkRate() to report. Main queue.
+        var rateNote: String?
         let uuid = UUID()
         let generation: Int
         let objects: [AudioObjectID]
@@ -169,6 +190,10 @@ final class ProcessTapSource: CaptureSource {
     private var nextGeneration = 0
     /// Generation whose buffers reach the writer; the newest instance claims it on its first buffer.
     private let liveGeneration = Locked(0)
+    /// `--debug-tap-rate` (tests only): start every tap at this wrong rate, for checkRate() to correct.
+    nonisolated(unsafe) static var debugInitialRate: Double?
+    static let standardRates: [Double] = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
+                                          88200, 96000, 176_400, 192_000]
 
     init(mode: Mode, prefixes: [String], writer: TrackWriter) {
         self.mode = mode
@@ -227,6 +252,43 @@ final class ProcessTapSource: CaptureSource {
         }
     }
 
+    /// Once a second from the session's watchdog: if the device's sample clock says it runs at a
+    /// different rate than buffers are read at, switch to the clock's rate. Returns what changed, if
+    /// anything (including a change the rate listener already adopted).
+    func checkRate() -> String? {
+        guard let instance = current else { return nil }
+        if let note = instance.rateNote {
+            instance.rateNote = nil
+            return note
+        }
+        let c = instance.clock.get()
+        guard c.startHost != 0, c.lastHost > c.startHost else { return nil }
+        let span = HostTime.seconds(Int64(c.lastHost - c.startHost))
+        guard span >= 1 else { return nil }
+        instance.clock.update { $0.startSample = $0.lastSample; $0.startHost = $0.lastHost }  // next window
+        let measured = (c.lastSample - c.startSample) / span
+        guard let rate = Self.standardRates.first(where: { abs($0 - measured) / $0 < 0.02 }),
+              let reading = instance.ioFormat.get()?.sampleRate, abs(rate - reading) / reading > 0.005 else { return nil }
+        setRate(rate, of: instance)
+        return "audio arrived at \(Self.hz(rate)) but was read as \(Self.hz(reading)); corrected"
+    }
+
+    private static func hz(_ rate: Double) -> String {
+        rate.truncatingRemainder(dividingBy: 1000) == 0 ? "\(Int(rate / 1000)) kHz" : String(format: "%.1f kHz", rate / 1000)
+    }
+
+    private func setRate(_ rate: Double, of instance: Instance) {
+        var asbd = instance.tapFormat
+        asbd.mSampleRate = rate
+        instance.ioFormat.set(AVAudioFormat(streamDescription: &asbd))
+    }
+
+    /// The rate the aggregate (so the output device) runs at; the tap's own rate if it can't say.
+    private func deviceRate(_ instance: Instance) -> Double {
+        let nominal = audioProperty(instance.aggregateID, kAudioDevicePropertyNominalSampleRate, Float64(0)) ?? 0
+        return nominal > 0 ? nominal : instance.tapFormat.mSampleRate
+    }
+
     /// Stop the tap's device in place, as if it had died; the instance is left for stop().
     func simulateFailure() {
         for instance in retiring + [current].compactMap({ $0 }) {
@@ -260,11 +322,11 @@ final class ProcessTapSource: CaptureSource {
         var addr = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat, mScope: kAudioObjectPropertyScopeGlobal,
                                               mElement: kAudioObjectPropertyElementMain)
         err = AudioObjectGetPropertyData(instance.tapID, &addr, 0, nil, &size, &asbd)
-        guard err == noErr, let format = AVAudioFormat(streamDescription: &asbd) else {
+        guard err == noErr, AVAudioFormat(streamDescription: &asbd) != nil else {
             AudioHardwareDestroyProcessTap(instance.tapID)
             throw TapError(code: "tap_failed", description: "Could not read the tap's audio format (\(err))")
         }
-        instance.format = format
+        instance.tapFormat = asbd
         do {
             try startAggregate(instance)
         } catch {
@@ -307,10 +369,27 @@ final class ProcessTapSource: CaptureSource {
         ]
         var err = AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &instance.aggregateID)
         guard err == noErr else { throw TapError(code: "tap_failed", description: "Could not create the tap device (\(err))") }
-        guard let format = instance.format else { return }
+        setRate(Self.debugInitialRate ?? deviceRate(instance), of: instance)
+        instance.clock.set(Clock())
+        // The device's rate changes under a running tap: a headset switching to hands-free for a call.
+        let listener: AudioObjectPropertyListenerBlock = { [weak self, weak instance] _, _ in
+            guard let self, let instance, instance.aggregateID != kAudioObjectUnknown else { return }
+            let rate = deviceRate(instance)
+            guard let reading = instance.ioFormat.get()?.sampleRate, rate != reading else { return }
+            setRate(rate, of: instance)
+            instance.rateNote = "the output device switched from \(Self.hz(reading)) to \(Self.hz(rate))"
+        }
+        var rateAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+                                                  mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        if AudioObjectAddPropertyListenerBlock(instance.aggregateID, &rateAddr, .main, listener) == noErr {
+            instance.rateListener = listener
+        }
         let writer = self.writer
         let live = liveGeneration
         let generation = instance.generation
+        let ioFormat = instance.ioFormat
+        let clock = instance.clock
+        let pause = HostTime.ticks(seconds: 0.2)
         var claimed = false  // touched only by this instance's IO thread
         err = AudioDeviceCreateIOProcIDWithBlock(&instance.procID, instance.aggregateID, nil) { _, input, inputTime, _, _ in
             // Real-time thread: claim the track on the first buffer, drop buffers once superseded.
@@ -318,7 +397,18 @@ final class ProcessTapSource: CaptureSource {
                 claimed = true
                 live.update { $0 = max($0, generation) }
             }
-            guard live.get() == generation else { return }
+            let time = inputTime.pointee
+            if time.mFlags.contains(.sampleTimeValid), time.mFlags.contains(.hostTimeValid) {
+                clock.update { c in
+                    if c.startHost == 0 || time.mSampleTime < c.lastSample || time.mHostTime > c.lastHost &+ pause {
+                        c.startSample = time.mSampleTime
+                        c.startHost = time.mHostTime
+                    }
+                    c.lastSample = time.mSampleTime
+                    c.lastHost = time.mHostTime
+                }
+            }
+            guard live.get() == generation, let format = ioFormat.get() else { return }
             let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
             guard let first = source.first, first.mDataByteSize > 0 else { return }
             let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
@@ -337,6 +427,12 @@ final class ProcessTapSource: CaptureSource {
     }
 
     private func stopAggregate(_ instance: Instance) {
+        if let listener = instance.rateListener {
+            var rateAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+                                                      mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(instance.aggregateID, &rateAddr, .main, listener)
+            instance.rateListener = nil
+        }
         if let procID = instance.procID {
             AudioDeviceStop(instance.aggregateID, procID)
             AudioDeviceDestroyIOProcID(instance.aggregateID, procID)

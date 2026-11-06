@@ -3,7 +3,7 @@ import AppKit
 import CoreAudio
 import Foundation
 
-let kHelperVersion = "2.1.0"  // 2.1: lost-source detection and recovery
+let kHelperVersion = "2.2.0"  // 2.2: tap audio read at the device's real sample rate
 let kProtocolVersion = 1
 
 /// Session-mode capture (`capture --session DIR --control stdio`): any number of sources, each
@@ -493,6 +493,9 @@ final class CaptureSession {
             let due = entry.source?.isAudioDue(processes) ?? true
             entry.dueSince = due ? (entry.dueSince ?? t) : nil
             let last = entry.writer.lastAppendHostTime
+            if entry.state == "active", let tap = entry.source as? ProcessTapSource, let note = tap.checkRate() {
+                notice("info", "tap_rate_changed", "\(entry.name): \(note).", source: entry.id)
+            }
             if entry.state == "active" {
                 guard let dueSince = entry.dueSince else { continue }
                 let since = max(dueSince, last, entry.watchFrom)
@@ -746,6 +749,9 @@ func runSessionCapture(_ args: [String]) -> Never {
             options.silenceTimeout = seconds
         case "--capture-mode-all": break  // session mode always captures all system audio
         case "--debug-commands": options.debugCommands = true  // tests only; not in the usage text
+        case "--debug-tap-rate":  // tests only: start taps at a wrong rate, as a misreporting device would
+            guard let rate = Double(value("--debug-tap-rate")), rate > 0 else { fputs("Error: --debug-tap-rate needs Hz\n", stderr); exit(64) }
+            ProcessTapSource.debugInitialRate = rate
         default:
             fputs("Unknown option for session capture: \(args[i])\n", stderr)
             exit(64)
