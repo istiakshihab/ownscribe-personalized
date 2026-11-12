@@ -280,6 +280,10 @@ class MLXWhisperTranscriber(Transcriber):
                 self._set_detail("transcribing", None)
 
                 audio = whisperx.load_audio(str(audio_path))
+                # Speakers are found from the audio alone, so pyannote runs while Whisper decodes.
+                diarization_result = None
+                if self._will_diarize() and self._diar_config.parallel:
+                    diarization_result = self._start_diarization(audio, exclusive=False)
 
                 initial_prompt = self._tx_config.initial_prompt or None
                 if self._tx_config.hotwords:
@@ -338,7 +342,9 @@ class MLXWhisperTranscriber(Transcriber):
                 progress.complete("transcribing")
 
                 # --- Optional diarization ---
-                if self._will_diarize():
+                if diarization_result is not None:
+                    result = self._assign_speakers(diarization_result(), result)
+                elif self._will_diarize():
                     result = self._diarize(audio, result)
         finally:
             devnull.close()
@@ -371,12 +377,23 @@ class MLXWhisperTranscriber(Transcriber):
         return TranscriptResult(segments=segments, language=language, duration=duration)
 
     def _diarize(self, audio, result):
-        import pandas as pd
+        """Diarize after transcription (`[diarization] parallel = false`)."""
+        return self._assign_speakers(self._start_diarization(audio)(), result)
+
+    def _start_diarization(self, audio, *, exclusive: bool = True):
+        """Start pyannote on the decoded audio in a background thread and return a function that waits
+        for its result (re-raising its error). The pipeline is loaded here, on the calling thread: loading
+        captures stdout and stderr, which must not happen from a second thread while Whisper's progress
+        is being read from them."""
+        import threading
+
         import torch
-        import whisperx
 
         progress = self._progress
-        progress.begin("diarizing")
+        if exclusive:
+            progress.begin("diarizing")
+        else:  # alongside "transcribing", which keeps running
+            progress.begin("diarizing", exclusive=False)
         diarize_model = self._load_diarization_pipeline(step_key="diarizing")
 
         # Build audio_data dict the same way whisperx does internally
@@ -391,12 +408,34 @@ class MLXWhisperTranscriber(Transcriber):
         if self._diar_config.max_speakers > 0:
             diarize_kwargs["max_speakers"] = self._diar_config.max_speakers
 
-        # Call pyannote pipeline directly with progress hook
-        diarization = diarize_model.model(
-            audio_data, hook=progress.diarization_hook, **diarize_kwargs
-        )
+        outcome: dict = {}
 
-        progress.complete("diarizing")
+        def run() -> None:
+            try:
+                # Call pyannote pipeline directly with progress hook
+                outcome["diarization"] = diarize_model.model(
+                    audio_data, hook=progress.diarization_hook, **diarize_kwargs
+                )
+                progress.complete("diarizing")
+            except BaseException as exc:  # handed to the waiting thread
+                progress.fail("diarizing")
+                outcome["error"] = exc
+
+        # Daemon: a cancelled job (SIGTERM) exits without waiting for pyannote.
+        thread = threading.Thread(target=run, name="diarization", daemon=True)
+        thread.start()
+
+        def wait():
+            thread.join()
+            if "error" in outcome:
+                raise outcome["error"]
+            return outcome["diarization"]
+
+        return wait
+
+    def _assign_speakers(self, diarization, result):
+        import pandas as pd
+        import whisperx
 
         # Convert to DataFrame (replicating whisperx/diarize.py logic)
         diarize_df = pd.DataFrame(

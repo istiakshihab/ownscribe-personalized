@@ -339,13 +339,15 @@ class PipelineProgress:
 
     # -- public API ----------------------------------------------------------
 
-    def begin(self, key: str) -> None:
+    def begin(self, key: str, *, exclusive: bool = True) -> None:
+        """Start a step. It ends any running sibling at its level unless `exclusive` is false: then
+        both run at once (diarization alongside transcription)."""
         with self._lock:
             step = self._step_map.get(key)
             if step is None:
                 return
             # Auto-complete any active sibling at the same indent level
-            for other_key in list(self._active):
+            for other_key in list(self._active) if exclusive else []:
                 other = self._step_map[other_key]
                 if other.indent == step.indent:
                     self._active.discard(other_key)
@@ -478,7 +480,7 @@ class PipelineProgress:
 class NullProgress:
     """No-op progress for when no display is needed."""
 
-    def begin(self, key: str) -> None:
+    def begin(self, key: str, *, exclusive: bool = True) -> None:
         pass
 
     def complete(self, key: str) -> None:

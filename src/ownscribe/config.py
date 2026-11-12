@@ -101,6 +101,9 @@ class DiarizationConfig:
     max_speakers: int = 0
     telemetry: bool = False
     device: str = "auto"
+    # Find speakers while Whisper transcribes (they only meet when words get their speakers); false runs
+    # them one after the other, as before.
+    parallel: bool = True
     ask_speaker_names: bool = True  # interactively name SPEAKER_00/01/... after diarization (skipped when not a TTY)
 
 

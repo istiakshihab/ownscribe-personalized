@@ -7,6 +7,10 @@ from unittest import mock
 
 import pytest
 
+# Loaded once, up front: tests here fake modules with mock.patch.dict(sys.modules), which drops anything
+# first imported inside the patch, and torch can't be imported a second time in one process.
+import torch  # noqa: F401
+
 
 class TestFfmpegCheck:
     def test_missing_ffmpeg_exits(self):
@@ -396,3 +400,101 @@ class TestDiarizationApiCompat:
 
         fake_annotation.itertracks.assert_called_once_with(yield_label=True)
         assert out[0] == "assigned"
+
+
+class TestParallelDiarization:
+    """pyannote runs while Whisper decodes; speakers are assigned once both are done."""
+
+    def _run(self, parallel: bool):
+        import time
+
+        import numpy as np
+
+        from ownscribe.config import DiarizationConfig, TranscriptionConfig
+        from ownscribe.progress import PipelineProgress
+        from ownscribe.transcription.mlx_transcriber import MLXWhisperTranscriber
+
+        spans: dict[str, tuple[float, float]] = {}
+        transcribing_when_diarization_began: list[bool] = []
+        progress = PipelineProgress(diarize=True)
+        progress._render_all = lambda **_kw: None  # no terminal drawing in tests
+
+        def fake_transcribe(*_args, **_kwargs):
+            t = time.monotonic()
+            time.sleep(0.3)
+            spans["whisper"] = (t, time.monotonic())
+            return {"segments": [{"text": "hi", "start": 0.0, "end": 1.0, "words": []}], "language": "en"}
+
+        class FakeDiarizeModel:
+            def model(self, _audio, hook=None, **_kw):
+                transcribing_when_diarization_began.append("transcribing" in progress._active)
+                t = time.monotonic()
+                time.sleep(0.3)
+                spans["diarization"] = (t, time.monotonic())
+                return types.SimpleNamespace(
+                    speaker_diarization=types.SimpleNamespace(
+                        itertracks=lambda yield_label: [(types.SimpleNamespace(start=0, end=1), "t", "SPEAKER_00")]
+                    )
+                )
+
+        fake_whisperx = types.SimpleNamespace(
+            load_audio=lambda _p: np.zeros(16000, dtype=np.float32),
+            assign_word_speakers=lambda _df, res: {
+                **res, "segments": [{**res["segments"][0], "speaker": "SPEAKER_00"}]},
+        )
+        diar = DiarizationConfig(enabled=True, hf_token="hf_x", device="cpu", parallel=parallel)
+        transcriber = MLXWhisperTranscriber(TranscriptionConfig(language="en"), diar, progress=progress)
+        transcriber._model_loaded = True
+        start = time.monotonic()
+        with (
+            mock.patch.dict("sys.modules", {"whisperx": fake_whisperx,
+                                            "mlx_whisper": types.SimpleNamespace(transcribe=fake_transcribe)}),
+            mock.patch.object(transcriber, "_load_diarization_pipeline", return_value=FakeDiarizeModel()),
+        ):
+            result = transcriber._transcribe_inner(mock.MagicMock())
+        return result, spans, time.monotonic() - start, transcribing_when_diarization_began, progress
+
+    def test_runs_alongside_transcription(self):
+        result, spans, _elapsed, transcribing, progress = self._run(parallel=True)
+        (w0, w1), (d0, d1) = spans["whisper"], spans["diarization"]
+        assert d0 < w1 and w0 < d1  # the two overlapped
+        assert transcribing == [True]  # starting diarization didn't end transcription early
+        assert result.segments[0].speaker == "SPEAKER_00"
+        assert {"transcribing", "diarizing"} <= progress._completed
+
+    def test_parallel_false_runs_after_transcription(self):
+        result, spans, _elapsed, transcribing, _progress = self._run(parallel=False)
+        assert spans["diarization"][0] >= spans["whisper"][1]
+        assert transcribing == [False]
+        assert result.segments[0].speaker == "SPEAKER_00"
+
+    def test_a_diarization_error_reaches_the_caller(self):
+        import numpy as np
+        import pytest
+
+        from ownscribe.config import DiarizationConfig, TranscriptionConfig
+        from ownscribe.transcription.mlx_transcriber import MLXWhisperTranscriber
+
+        class Broken:
+            def model(self, *_a, **_k):
+                raise RuntimeError("pyannote exploded")
+
+        fake_whisperx = types.SimpleNamespace(load_audio=lambda _p: np.zeros(16000, dtype=np.float32))
+        fake_mlx = types.SimpleNamespace(transcribe=lambda *_a, **_k: {"segments": [], "language": "en"})
+        diar = DiarizationConfig(enabled=True, hf_token="hf_x", device="cpu", parallel=True)
+        transcriber = MLXWhisperTranscriber(TranscriptionConfig(language="en"), diar, progress=_FakeProgressKw())
+        transcriber._model_loaded = True
+        with (
+            mock.patch.dict("sys.modules", {"whisperx": fake_whisperx, "mlx_whisper": fake_mlx}),
+            mock.patch.object(transcriber, "_load_diarization_pipeline", return_value=Broken()),
+            pytest.raises(RuntimeError, match="pyannote exploded"),
+        ):
+            transcriber._transcribe_inner(mock.MagicMock())
+
+
+class _FakeProgressKw(_FakeProgress):
+    def begin(self, key: str, *, exclusive: bool = True) -> None:
+        self.calls.append(("begin", key))
+
+    def diarization_hook(self, *_a, **_k) -> None:
+        pass

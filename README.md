@@ -275,6 +275,7 @@ min_speakers = 0          # 0 = auto-detect
 max_speakers = 0
 telemetry = false         # allow HuggingFace Hub + pyannote metrics telemetry
 device = "auto"           # "auto" (mps if available), "mps", or "cpu"
+parallel = true           # find speakers while Whisper transcribes (false = one after the other)
 ask_speaker_names = true  # interactively name SPEAKER_00/01/... after diarization (skipped when not a TTY)
 
 [summarization]
