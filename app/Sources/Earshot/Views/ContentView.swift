@@ -5,6 +5,42 @@ struct ContentView: View {
     let app: AppModel
 
     var body: some View {
+        NavigationSplitView(columnVisibility: Binding(
+            get: { app.sidebarVisible ? .all : .detailOnly },
+            set: { app.sidebarVisible = $0 != .detailOnly }
+        )) {
+            SidebarView(app: app)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 360)
+        } detail: {
+            Group {
+                if let item = app.selectedItem {
+                    SessionDetailView(app: app, item: item)
+                } else {
+                    RecorderView(app: app)
+                }
+            }
+            // Frosted window background: the desktop shows through, blurred, as in System Settings.
+            .containerBackground(for: .window) { FrostedBackground() }
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    TimerLabel(recorder: app.recorder)
+                }
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+                ToolbarItem(placement: .primaryAction) {
+                    RecordButton(app: app)
+                }
+            }
+            .frame(minWidth: 880)
+        }
+        .task { await app.launch() }
+    }
+}
+
+/// The recorder: signal, mixer, mic and save folder, then this recording's processing and results.
+struct RecorderView: View {
+    let app: AppModel
+
+    var body: some View {
         // No page scrolling: the fixed parts sit on top and the results area (transcript, summary)
         // takes whatever height is left, scrolling inside itself.
         VStack(spacing: 14) {
@@ -21,7 +57,7 @@ struct ContentView: View {
                 SaveLocationPicker(app: app)
             }
             .padding(.horizontal, 4)
-            PipelinePanel(app: app)
+            PipelinePanel(app: app, pipeline: app.pipeline)
                 .frame(maxHeight: .infinity)
         }
         .padding(.horizontal, 20)
@@ -29,21 +65,8 @@ struct ContentView: View {
         .padding(.bottom, 18)
         .frame(maxWidth: 1100, maxHeight: .infinity, alignment: .top)
         .frame(maxWidth: .infinity)
-        // Frosted window background: the desktop shows through, blurred, as in System Settings.
-        .containerBackground(for: .window) { FrostedBackground() }
         .navigationTitle("Earshot")
         .navigationSubtitle(app.statusLine)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                TimerLabel(recorder: app.recorder)
-            }
-            ToolbarSpacer(.fixed, placement: .primaryAction)
-            ToolbarItem(placement: .primaryAction) {
-                RecordButton(app: app)
-            }
-        }
-        .frame(minWidth: 880)
-        .task { await app.launch() }
     }
 }
 

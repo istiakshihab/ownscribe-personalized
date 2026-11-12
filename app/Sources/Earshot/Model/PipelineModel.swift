@@ -39,6 +39,8 @@ final class PipelineModel {
     ]
 
     var sessionPath: String?
+    /// The session's stable id (session.json `id`), which survives the folder's rename after its title.
+    var sessionID: String?
     var hasRun = false
     var transcription = Stage()
     var diarization = Stage()
@@ -70,6 +72,8 @@ final class PipelineModel {
     var template = Prefs.string(Prefs.template) { didSet { Prefs.defaults.set(template, forKey: Prefs.template) } }
 
     @ObservationIgnored var ownscribe: () throws -> ToolCommand = { throw NSError(domain: "ownscribe", code: 1) }
+    /// After every job, so the history list can pick up new titles, summaries and notes.
+    @ObservationIgnored var onJobFinished: (() -> Void)?
     @ObservationIgnored private var job: JobProcess?
     @ObservationIgnored private var sawError = false
     @ObservationIgnored private var renameTask: Task<Void, Never>?
@@ -95,6 +99,7 @@ final class PipelineModel {
         renamePending = false
         templatePending = nil
         sessionPath = nil
+        sessionID = nil
         hasRun = false
         transcription = Stage()
         diarization = Stage()
@@ -120,8 +125,10 @@ final class PipelineModel {
     }
 
     func process(session: String) {
+        let id = sessionID.flatMap { sessionPath == session ? $0 : nil } ?? Self.sessionID(at: session)
         reset()
         sessionPath = session
+        sessionID = id
         hasRun = true
         ranDiarize = diarizeOn
         ranSummarize = summarizeOn
@@ -158,6 +165,7 @@ final class PipelineModel {
     private func finished(_ command: String, code: Int32, stderr: String) {
         job = nil
         jobCommand = nil
+        defer { onJobFinished?() }
         if command == "file" {
             finishedFiling(code: code, stderr: stderr)
         } else {
@@ -235,10 +243,98 @@ final class PipelineModel {
         run("resummarize", [path, "--template", name])
     }
 
+    // MARK: - Opening a past session
+
+    static func sessionID(at path: String) -> String {
+        let url = URL(fileURLWithPath: path)
+        let state = (try? Data(contentsOf: url.appendingPathComponent("session.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        return (state?["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? url.lastPathComponent
+    }
+
+    /// Show a session from disk, as the jobs left it: stage results, transcript, speakers, summary and
+    /// vault note. Speaker naming, re-summarizing and filing then work on it as on a fresh recording.
+    func open(_ item: HistoryItem) {
+        reset()
+        sessionPath = item.path
+        sessionID = item.id
+        hasRun = true
+        let dir = URL(fileURLWithPath: item.path)
+        func read(_ name: String) -> Data? { try? Data(contentsOf: dir.appendingPathComponent(name)) }
+        let state = read("session.json").flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+
+        let options = state["options"] as? [String: Any] ?? [:]
+        ranDiarize = (options["diarize"] as? Bool) ?? true
+        ranSummarize = (options["summarize"] as? Bool) ?? true
+        let stages = state["stages"] as? [String: Any] ?? [:]
+        func stage(_ name: String, fallback: Status) -> Stage {
+            guard let entry = stages[name] as? [String: Any] else { return Stage(status: fallback) }
+            let message = (entry["error"] as? [String: Any])?["message"] as? String
+            switch entry["status"] as? String {
+            case "done": return Stage(status: .done, fraction: 1)
+            case "failed": return Stage(status: .failed, message: message.map { Self.friendly(code: nil, message: $0) } ?? "Failed")
+            case "skipped": return Stage(status: .skipped)
+            // Nothing is running it now: the app quit, or the job was stopped, before it finished.
+            case "running": return Stage(status: .cancelled, message: "Didn't finish")
+            default: return Stage(status: fallback)
+            }
+        }
+        transcription = stage("transcription", fallback: item.hasTranscript ? .done : .waiting)
+        diarization = stage("diarization", fallback: .waiting)
+        summarization = stage("summarization", fallback: item.hasSummary ? .done : .waiting)
+        if !ranDiarize, diarization.status == .waiting { diarization.status = .skipped }
+        if !ranSummarize, summarization.status == .waiting { summarization.status = .skipped }
+        if diarization.status == .done { for step in Self.diarizationSteps { substeps[step] = Stage(status: .done) } }
+
+        let speakers = state["speakers"] as? [String: Any] ?? [:]
+        labels = speakers["labels"] as? [String] ?? []
+        names = speakers["names"] as? [String: String] ?? [:]
+        roles = speakers["roles"] as? [String: String] ?? [:]
+
+        if let data = read("transcript.json"), let t = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let list = t["segments"] as? [[String: Any]] ?? []
+            segments = list.enumerated().map { i, s in
+                Segment(id: i + 1, start: (s["start"] as? NSNumber)?.doubleValue ?? 0, end: (s["end"] as? NSNumber)?.doubleValue ?? 0,
+                        text: ((s["text"] as? String) ?? "").trimmingCharacters(in: .whitespaces), speaker: s["speaker"] as? String)
+            }
+        } else if let data = read("transcript.md"), let text = String(data: data, encoding: .utf8) {
+            let parsed = MarkdownTranscript.segments(text)
+            segments = parsed.enumerated().map { i, s in
+                Segment(id: i + 1, start: s.start, end: i + 1 < parsed.count ? parsed[i + 1].start : s.start,
+                        text: s.text, speaker: s.speaker)
+            }
+            if labels.isEmpty { labels = Array(NSOrderedSet(array: parsed.compactMap(\.speaker))) as? [String] ?? [] }
+        }
+        segmentCounter = segments.count
+        diarized = !labels.isEmpty
+        if transcription.status == .waiting, !segments.isEmpty { transcription.status = .done }
+        // A transcript without these steps: they never ran for this recording.
+        if transcription.status == .done {
+            for stage in [\PipelineModel.diarization, \.summarization] where self[keyPath: stage].status == .waiting {
+                self[keyPath: stage] = Stage(status: .cancelled, message: "Didn't run")
+            }
+        }
+
+        if let data = read("summary.md"), let text = String(data: data, encoding: .utf8) {
+            let info = state["summary"] as? [String: Any]
+            summary = Summary(title: state["title"] as? String, text: text, raw: nil, template: info?["template"] as? String)
+            loadRawSummary()
+        }
+
+        if let note = state["vault_note"] as? [String: Any], let path = note["path"] as? String {
+            vaultNote = VaultNote(path: path, needsReview: (note["needs_review"] as? Bool) ?? false)
+            vault = Stage(status: .done)
+        }
+    }
+
     // MARK: - Obsidian vault
 
-    /// There's a transcript to file.
-    var canDraft: Bool { hasRun && sessionPath != nil && transcription.status == .done && !segments.isEmpty }
+    /// There's a transcript to file (transcript.json: recordings from before it existed were filed by
+    /// the terminal pipeline back then).
+    var canDraft: Bool {
+        guard hasRun, let path = sessionPath, transcription.status == .done, !segments.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent("transcript.json"))
+    }
     var vaultOff: Bool { !(vaultSettings?.enabled ?? false) || !(vaultSettings?.exists ?? false) }
 
     private var hasUncommittedNames: Bool {
@@ -606,10 +702,11 @@ final class PipelineModel {
     }
 
     var savedFiles: [String] {
-        guard hasRun else { return [] }
-        var files = ["recording.wav"]
-        if !segments.isEmpty { files.append("transcript.md") }
-        if summary != nil { files.append("summary.md") }
-        return files
+        guard hasRun, let path = sessionPath else { return [] }
+        return ["recording.wav", "transcript.md", "summary.md"].filter {
+            FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent($0))
+        }
     }
+
+    var hasRecordingFile: Bool { savedFiles.contains("recording.wav") }
 }

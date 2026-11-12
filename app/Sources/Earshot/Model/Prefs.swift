@@ -11,6 +11,7 @@ enum Prefs {
     static let summarize = "summarize"
     static let template = "template"
     static let settingsTab = "settingsTab"   // backend | huggingface
+    static let sidebarVisible = "sidebarVisible"
 
     /// The ownscribe checkout this app was built from: app/build.sh records it in Info.plist, so an
     /// installed copy (install.sh) finds its own backend. A bundle without it falls back to the

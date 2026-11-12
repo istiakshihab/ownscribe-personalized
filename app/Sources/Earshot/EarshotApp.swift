@@ -23,7 +23,7 @@ struct EarshotApp: App {
         // needs a scroll bar. (After that, macOS reopens the window at the size it was left.)
         .defaultWindowPlacement { content, context in
             let visible = context.defaultDisplay.visibleRect
-            let width = min(1040, visible.width - 40)
+            let width = min(1300, visible.width - 40)  // room for the history sidebar
             let minimum = content.sizeThatFits(.init(width: width, height: nil)).height
             let height = min(visible.height - 40, max(minimum, 940))
             return WindowPlacement(size: CGSize(width: width, height: height))

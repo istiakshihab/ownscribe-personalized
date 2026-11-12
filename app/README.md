@@ -22,6 +22,15 @@ The window opens sized to the screen and only the transcript and summary scroll.
   runs `ownscribe file DIR --write --edits DIR/vault-edits.json`. With `confirm_before_filing = false` it
   drafts and writes right after processing, like the terminal pipeline. **Open in Obsidian** opens the
   note. `enabled = false` or a missing `vault_dir` turns the card off.
+- **History:** the sidebar lists every recording in the save folder by date (Today, Yesterday, Previous
+  7 Days, Previous 30 Days, then by month), with search, read straight from the session folders (title from
+  session.json, or the slug older recordings carry in their folder name). Opening one loads its stage results,
+  transcript (transcript.json, or transcript.md for recordings from the terminal days), speakers, summary and
+  vault note into the same panel as a fresh recording, so renaming speakers, re-summarizing and filing work
+  on past recordings too; one that was never transcribed offers **Transcribe**. Rows show a spinner while a
+  job runs, a warning when a step failed and a check once filed to Obsidian; the context menu has Show in
+  Finder, Open Note in Obsidian, Open Recording and Move to Trash (asks first). The standard sidebar button in
+  the toolbar folds it away, and the choice is remembered.
 - **Setup check:** `ownscribe doctor --json` problems show as banners under the title bar.
 
 ## Install

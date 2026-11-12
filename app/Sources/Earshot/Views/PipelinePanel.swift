@@ -4,11 +4,13 @@ import SwiftUI
 /// After recording: Transcription → Diarization → Summarization → Obsidian, then the results.
 struct PipelinePanel: View {
     let app: AppModel
+    /// This window's recording, or a past one opened from the sidebar.
+    let pipeline: PipelineModel
+    /// Shown on the right while nothing runs.
+    var hint = "Runs on this Mac when you press Stop"
     @ViewState private var tab = Tab.transcript
 
     enum Tab: Hashable { case transcript, summary }
-
-    private var pipeline: PipelineModel { app.pipeline }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -19,7 +21,7 @@ struct PipelinePanel: View {
                     Button("Cancel", role: .cancel) { pipeline.cancel() }
                         .controlSize(.small)
                 } else {
-                    Text("Runs on this Mac when you press Stop").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                    Text(hint).font(.system(size: 11)).foregroundStyle(Theme.ink3)
                 }
             }
             HStack(alignment: .top, spacing: 14) {
@@ -46,8 +48,9 @@ struct PipelinePanel: View {
     // MARK: Stage cards
 
     private var transcriptionCard: some View {
+        // No switch and no label: the title needs the width in a narrow window, and it always runs.
         StageCard(title: "Transcription", status: pipeline.transcription.status, off: false, accessory: {
-            Text("Always on").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+            EmptyView()
         }) {
             Text(whisperLabel).font(.system(size: 12)).foregroundStyle(Theme.ink3)
             ProgressBar(fraction: pipeline.preparingModels ? nil : (pipeline.transcription.status == .done ? 1 : pipeline.transcription.fraction ?? 0),
@@ -170,6 +173,15 @@ struct PipelinePanel: View {
                         .font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.ink2)
                         .lineLimit(2).truncationMode(.middle)
                         .textSelection(.enabled)
+                    if pipeline.hasRecordingFile {
+                        Button {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: path).appendingPathComponent("recording.wav"))
+                        } label: {
+                            Image(systemName: "play.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Play the recording")
+                    }
                     Button {
                         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                     } label: {
@@ -203,6 +215,7 @@ struct PipelinePanel: View {
     private var emptyTranscript: String {
         if pipeline.isProcessing { return "Transcribing… segments appear here as they're recognised." }
         if pipeline.transcription.status == .failed { return pipeline.transcription.message ?? "Transcription failed." }
+        if pipeline !== app.pipeline { return "Not transcribed yet. Transcribe above fills in the transcript, then who said what, then a summary." }
         return "Press Stop to transcribe this recording. The transcript fills in here, then who said what, then a summary."
     }
 
@@ -237,6 +250,8 @@ struct StageCard<Accessory: View, Content: View>: View {
             HStack(spacing: 8) {
                 StatusIcon(status: off ? .skipped : status, size: 20)
                 Text(title).font(.system(size: 13, weight: .semibold)).opacity(off ? 0.45 : 1)
+                    .lineLimit(1)
+                    .layoutPriority(1)
                 Spacer(minLength: 4)
                 accessory()
             }
