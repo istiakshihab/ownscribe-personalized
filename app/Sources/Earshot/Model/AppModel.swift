@@ -11,6 +11,12 @@ final class AppModel {
     /// The recording made in this window: what the recorder view shows under the mixer.
     let pipeline = PipelineModel()
     let history = HistoryModel()
+    /// Zoom and Teams calls (the helper's `watch-meetings`).
+    let meetings = MeetingWatcher()
+    /// The call you answered "Not now" for: no more prompts until it ends.
+    var dismissedMeeting: String?
+    /// Opens (or brings back) the main window; set by a view that has `openWindow`.
+    @ObservationIgnored var openMainWindow: (() -> Void)?
     var doctor: DoctorReport? {
         didSet {
             for p in [pipeline] + Array(openPipelines.values) { p.vaultSettings = doctor?.vault }
@@ -43,14 +49,102 @@ final class AppModel {
         recorder.onRecordingStarted = { [weak self] in
             guard let self else { return }
             selection = .recorder  // a new recording always shows the recorder
+            CallPrompt.shared.close()
             if !pipeline.isRunning { pipeline.reset() }
             refreshHistory()
         }
         recorder.onSaved = { [weak self] path, _ in
             guard let self else { return }
             self.recorder.resetForIdle()
-            self.pipeline.process(session: path)
+            if self.pipeline.isRunning {
+                // A call recorded while the last one was still processing: process it on its own,
+                // and keep it reachable from the sidebar.
+                let p = self.makePipeline()
+                p.process(session: path)
+                if let id = p.sessionID { self.openPipelines[id] = p }
+            } else {
+                self.pipeline.process(session: path)
+            }
             self.refreshHistory()
+        }
+
+        meetings.helper = { try Self.resolveTools().helper }
+        meetings.onStarted = { [weak self] m in self?.meetingStarted(m) }
+        meetings.onEnded = { [weak self] m, reason in self?.meetingEnded(m, reason: reason) }
+        Notifier.shared.onOpen = { [weak self] in self?.showMainWindow() }
+    }
+
+    // MARK: - Calls
+
+    /// Starts or stops call detection to match Settings (and the helper command).
+    func updateMeetingWatcher() async {
+        let on = Prefs.bool(Prefs.detectMeetings)
+        if on { Notifier.shared.setUp() }
+        await meetings.update(enabled: on)
+    }
+
+    /// The call to offer recording for: detected, not dismissed, and nothing recording yet.
+    var promptedMeeting: MeetingWatcher.Meeting? {
+        guard let m = meetings.current, m.id != dismissedMeeting, recorder.phase == .idle else { return nil }
+        return m
+    }
+
+    private func meetingStarted(_ m: MeetingWatcher.Meeting) {
+        // Already recording (you started it): system audio has the call in it already.
+        guard recorder.phase == .idle else { return }
+        if Prefs.bool(Prefs.meetingAutoStart) {
+            recordMeeting(m)
+        } else {
+            CallPrompt.shared.show(m.name, record: { [weak self] in self?.recordMeeting(m) },
+                                   notNow: { [weak self] in self?.dismissMeeting() })
+        }
+    }
+
+    private func meetingEnded(_ m: MeetingWatcher.Meeting, reason: String) {
+        if dismissedMeeting == m.id { dismissedMeeting = nil }
+        CallPrompt.shared.close()
+        guard recorder.origin == .meeting(m.app), recorder.phase == .recording || recorder.phase == .starting,
+              Prefs.bool(Prefs.meetingAutoStop) else { return }
+        recorder.stop()
+        Notifier.shared.meetingEnded(m.name)
+    }
+
+    /// Records the detected call: mic and system audio as always, plus the meeting app as its own
+    /// source. Allowed while the last recording is still processing (calls come back to back).
+    func recordMeeting(_ meeting: MeetingWatcher.Meeting? = nil) {
+        guard let m = meeting ?? meetings.current, recorder.phase == .idle else { return }
+        dismissedMeeting = nil
+        if !m.bundleID.isEmpty { recorder.addApp(AppInfo(bundleID: m.bundleID, name: m.name, playing: true)) }
+        CallPrompt.shared.close()
+        if Prefs.bool(Prefs.meetingAutoStart) { Notifier.shared.recordingStarted(m.name) }
+        Task { await recorder.start(origin: .meeting(m.app)) }
+    }
+
+    func dismissMeeting() {
+        dismissedMeeting = meetings.current?.id
+        CallPrompt.shared.close()
+    }
+
+    func showMainWindow() {
+        NSApp.activate()
+        openMainWindow?()
+    }
+
+    /// The menu bar's first line.
+    var menuStatus: String {
+        switch recorder.phase {
+        case .starting: return "Starting…"
+        case .stopping: return "Saving audio…"
+        case .recording:
+            let time = TimerLabel.format(recorder.elapsed)
+            if case let .meeting(app) = recorder.origin, let m = meetings.meetings.first(where: { $0.app == app }) {
+                return "Recording \(m.name) call · \(time)"
+            }
+            return "Recording · \(time)"
+        case .idle:
+            if let m = promptedMeeting { return "\(m.name) call in progress" }
+            if pipeline.isProcessing { return "Processing the last recording…" }
+            return "Not recording"
         }
     }
 
@@ -131,6 +225,7 @@ final class AppModel {
     }
 
     func launch() async {
+        await updateMeetingWatcher()
         await refreshDoctor()
         refreshHistory()
         await recorder.refreshDevices()
@@ -162,6 +257,9 @@ final class AppModel {
     /// Problems to show under the title bar: setup (doctor), recorder and pipeline errors, helper notices.
     var banners: [Banner] {
         var out: [Banner] = []
+        if let m = promptedMeeting {
+            out.append(.init(id: "meeting", text: "\(m.name) call started. Record it?", kind: .info, action: .recordMeeting))
+        }
         if let doctorError { out.append(.init(id: "doctor-error", text: doctorError, kind: .error, action: .settings)) }
         for p in doctor?.problems ?? [] where !dismissedProblems.contains(p.id) {
             out.append(.init(id: "doctor-\(p.id)", text: p.message, kind: p.isWarning ? .warning : .error,
@@ -190,6 +288,7 @@ final class AppModel {
     }
 
     func dismiss(_ banner: Banner) {
+        if banner.id == "meeting" { dismissMeeting() }
         if banner.id.hasPrefix("doctor-") { dismissedProblems.insert(String(banner.id.dropFirst(7))) }
         if banner.id == "recorder" { recorder.lastError = nil; recorder.recoverablePath = nil }
         if banner.id == "pipeline" { pipeline.lastError = nil }
@@ -224,9 +323,9 @@ final class AppModel {
 }
 
 struct Banner: Identifiable, Equatable {
-    enum Kind { case warning, error }
+    enum Kind { case info, warning, error }
     enum Action: Equatable {
-        case settings, huggingFace, recheck, log, recover, dismiss
+        case settings, huggingFace, recheck, log, recover, dismiss, recordMeeting
         case privacy(String)
     }
 

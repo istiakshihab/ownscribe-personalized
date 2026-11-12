@@ -3,7 +3,7 @@ import AppKit
 import CoreAudio
 import Foundation
 
-let kHelperVersion = "2.2.0"  // 2.2: tap audio read at the device's real sample rate
+let kHelperVersion = "2.3.0"  // 2.3: watch-meetings; 2.2: tap audio read at the device's real sample rate
 let kProtocolVersion = 1
 
 /// Session-mode capture (`capture --session DIR --control stdio`): any number of sources, each

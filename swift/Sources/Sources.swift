@@ -88,6 +88,8 @@ struct AudioProcessInfo {
     let pid: pid_t
     let bundleID: String
     let isPlaying: Bool
+    /// The process has audio input running (a call or recorder has the mic open).
+    let isRecording: Bool
 }
 
 func audioProcessObjects() -> [AudioProcessInfo] {
@@ -102,7 +104,8 @@ func audioProcessObjects() -> [AudioProcessInfo] {
         AudioProcessInfo(object: id,
                          pid: audioProperty(id, kAudioProcessPropertyPID, pid_t(0)) ?? 0,
                          bundleID: audioStringProperty(id, kAudioProcessPropertyBundleID) ?? "",
-                         isPlaying: (audioProperty(id, kAudioProcessPropertyIsRunningOutput, UInt32(0)) ?? 0) != 0)
+                         isPlaying: (audioProperty(id, kAudioProcessPropertyIsRunningOutput, UInt32(0)) ?? 0) != 0,
+                         isRecording: (audioProperty(id, kAudioProcessPropertyIsRunningInput, UInt32(0)) ?? 0) != 0)
     }
 }
 

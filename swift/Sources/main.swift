@@ -22,12 +22,20 @@ func printUsage() {
                                 [--mic-device UID] [--app BUNDLE_ID]... [--exclude-bundle BUNDLE_ID]...
                                 [--silence-timeout N] [--source test-tone]
         ownscribe-audio merge --session DIR
+        ownscribe-audio watch-meetings --control stdio [--interval S] [--start-after S] [--end-after S]
         ownscribe-audio list-apps [--json]
         ownscribe-audio list-devices [--json]
 
     SESSION MODE (docs/engine-protocol.md):
         JSON commands on stdin, JSON events on stdout; per-source tracks in DIR/tracks,
         capture.json, and the mixdown in DIR/recording.wav. --source test-tone needs no permissions.
+
+    WATCH MODE:
+        Reports Zoom and Teams calls as JSON events on stdout (watch_ready, meeting_started,
+        meeting_ended); {"cmd":"stop"} or stdin EOF ends it. A call starts once an app's process has
+        had the mic running for --start-after seconds (default 3) and ends when the app has had no
+        audio for --end-after seconds (default 20) or quits. Polls every --interval seconds (default 1).
+        Needs no permissions.
 
     OPTIONS:
         --output, -o FILE    Output WAV file path (required for capture)
@@ -42,6 +50,7 @@ func printUsage() {
 
     SUBCOMMANDS:
         capture              Record audio to a WAV file
+        watch-meetings       Watch for Zoom and Teams calls
         list-apps            Show running applications
         list-devices         Show available audio input devices
 
@@ -69,6 +78,9 @@ func main() {
 
     case "merge":
         runMergeCommand(Array(args.dropFirst(2)))
+
+    case "watch-meetings":
+        runMeetingWatch(Array(args.dropFirst(2)))
 
     case "capture":
         // The Python wrapper reads our stderr through a pipe. If it goes away (a second

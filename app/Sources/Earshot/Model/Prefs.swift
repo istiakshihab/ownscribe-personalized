@@ -10,8 +10,12 @@ enum Prefs {
     static let diarize = "diarize"
     static let summarize = "summarize"
     static let template = "template"
-    static let settingsTab = "settingsTab"   // backend | huggingface
+    static let settingsTab = "settingsTab"   // backend | huggingface | meetings
     static let sidebarVisible = "sidebarVisible"
+    static let detectMeetings = "detectMeetings"        // watch for Zoom and Teams calls
+    static let meetingAutoStart = "meetingAutoStart"    // record a detected call without asking
+    static let meetingAutoStop = "meetingAutoStop"      // stop a detection-started recording when the call ends
+    static let keepInMenuBar = "keepInMenuBar"          // menu bar icon; closing the window doesn't quit
 
     /// The ownscribe checkout this app was built from: app/build.sh records it in Info.plist, so an
     /// installed copy (install.sh) finds its own backend. A bundle without it falls back to the
@@ -38,6 +42,10 @@ enum Prefs {
             diarize: true,
             summarize: true,
             template: "meeting",
+            detectMeetings: true,
+            meetingAutoStart: false,
+            meetingAutoStop: true,
+            keepInMenuBar: true,
         ])
     }
 

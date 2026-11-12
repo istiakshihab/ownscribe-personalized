@@ -1,7 +1,9 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
-/// Earshot ▸ Settings…: the backend commands, and the Hugging Face token diarization needs.
+/// Earshot ▸ Settings…: the backend commands, the Hugging Face token diarization needs, and call
+/// detection.
 struct SettingsView: View {
     let app: AppModel
     @AppStorage(Prefs.settingsTab) private var tab = "backend"
@@ -14,6 +16,9 @@ struct SettingsView: View {
             HuggingFaceSettings(app: app)
                 .tabItem { Label("Hugging Face", systemImage: "key") }
                 .tag("huggingface")
+            MeetingSettings(app: app)
+                .tabItem { Label("Meetings", systemImage: "video") }
+                .tag("meetings")
         }
         .frame(width: 580)
     }
@@ -203,5 +208,83 @@ struct TestResultView: View {
         Label(text, systemImage: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
             .foregroundStyle(ok ? Theme.good : Theme.crit)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Zoom and Teams call detection, and running from the menu bar.
+struct MeetingSettings: View {
+    let app: AppModel
+    @AppStorage(Prefs.detectMeetings) private var detect = true
+    @AppStorage(Prefs.meetingAutoStart) private var autoStart = false
+    @AppStorage(Prefs.meetingAutoStop) private var autoStop = true
+    @AppStorage(Prefs.keepInMenuBar) private var menuBar = true
+    @ViewState private var loginStatus = SMAppService.mainApp.status
+    @ViewState private var loginError: String?
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Detect Zoom and Teams calls", isOn: $detect)
+                Toggle("Start recording automatically", isOn: $autoStart)
+                    .disabled(!detect)
+                Toggle("Stop when the call ends", isOn: $autoStop)
+                    .disabled(!detect)
+            } header: {
+                Text("Calls")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(watcherStatus)
+                    Text("When a call starts, Earshot asks in a small panel at the top right, unless it records automatically. A recording it started stops about 20 seconds after the call ends and is transcribed as usual. Recordings you start yourself are never stopped. Calls in a web browser aren't detected.")
+                }
+                .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Keep running in the menu bar", isOn: $menuBar)
+                Toggle("Open at login", isOn: Binding(get: { loginStatus == .enabled || loginStatus == .requiresApproval },
+                                                      set: setOpenAtLogin))
+            } header: {
+                Text("Background")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(menuBar ? "Closing the window keeps Earshot in the menu bar, still watching for calls. Quit from its menu."
+                                 : "Closing the window quits Earshot, so calls are only noticed while it's open.")
+                    if loginStatus == .requiresApproval {
+                        HStack {
+                            Text("Allow Earshot in System Settings › General › Login Items.")
+                            Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+                                .controlSize(.small)
+                        }
+                    }
+                    if let loginError { Text(loginError).foregroundStyle(Theme.crit) }
+                }
+                .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .onChange(of: detect) { Task { await app.updateMeetingWatcher() } }
+        .onChange(of: menuBar) { AppDelegate.updateAutomaticTermination() }
+        .onAppear { loginStatus = SMAppService.mainApp.status }
+    }
+
+    private var watcherStatus: String {
+        switch app.meetings.status {
+        case .off: return detect ? "Starting…" : "Call detection is off."
+        case .starting: return "Starting…"
+        case let .watching(names):
+            if let m = app.meetings.current { return "\(m.name) call in progress." }
+            return names.isEmpty ? "Watching for calls." : "Watching for \(names.joined(separator: " and ")) calls."
+        case .unsupported: return "The capture helper is too old for call detection. Rebuild it with `bash swift/build.sh`."
+        case let .failed(message): return message
+        }
+    }
+
+    private func setOpenAtLogin(_ on: Bool) {
+        loginError = nil
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            loginError = "Couldn't change the login item: \(error.localizedDescription)"
+        }
+        loginStatus = SMAppService.mainApp.status
     }
 }

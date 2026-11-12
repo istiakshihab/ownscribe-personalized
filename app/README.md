@@ -33,6 +33,49 @@ The window opens sized to the screen and only the transcript and summary scroll.
   the toolbar folds it away, and the choice is remembered.
 - **Setup check:** `ownscribe doctor --json` problems show as banners under the title bar.
 
+## Meeting detection
+
+Earshot notices when a call starts in the Zoom or Microsoft Teams desktop app and offers to record it.
+It keeps `ownscribe-audio watch-meetings --control stdio` running, which only reads which apps are using
+the mic and speakers ([Meeting watch](../docs/engine-protocol.md#meeting-watch)), so it needs no extra
+permission.
+
+- **When a call starts**, a small panel at the top right of the screen (over the call, without taking
+  focus) and a banner in the window ask whether to record it: **Record** or **Not now**. **Start
+  recording automatically** skips the question; it's off by default. A recording started this way has
+  the meeting app as its own source, next to the mic and system audio.
+- **When the call ends**, a recording Earshot started for it stops by itself (**Stop when the call ends**)
+  and then runs the usual pipeline (transcript, speakers, summary, Obsidian). A recording you start
+  yourself is never stopped by detection.
+- **Closing the window** leaves Earshot running in the menu bar, so it still notices calls. (A utility
+  that quits apps when their last window closes, such as Vorssaint's auto-quit, needs Earshot excluded.)
+- **Notifications** ("Zoom call ended · transcribing") only appear in a signed build: macOS refuses them
+  for the ad-hoc-signed app that `app/build.sh` makes, which is why the prompt is a panel.
+
+Settings ▸ Meetings:
+
+| setting | default |
+|---|---|
+| Detect Zoom and Teams calls | on |
+| Start recording automatically | off |
+| Stop when the call ends | on |
+| Keep running in the menu bar | on |
+| Open at login | off |
+
+Only the desktop apps are detected: a call in a browser (Google Meet, or Zoom or Teams on the web) or in
+another app (Slack huddles, FaceTime) isn't.
+
+To try it without a call, switch to the mock engine (below), quit Earshot, and open it with a fake one
+(`open` passes the variable only to a new launch):
+
+```bash
+open --env OWNSCRIBE_MOCK_MEETING=zoom:15:60 app/build/Earshot.app
+```
+
+The value is `APP:START[:END]`: `zoom` or `teams`, then seconds after the watch starts, divided by the
+mock's `--speed 5` (so this call runs from 3 s to 12 s). Leave the end off, or use `inf`, for a call that
+never ends.
+
 ## Install
 
 ```bash
@@ -59,7 +102,7 @@ The first recording asks for **Microphone** and **System Audio Recording** acces
 
 ## Settings
 
-Earshot ▸ Settings… has two tabs.
+Earshot ▸ Settings… has three tabs: Backend, Hugging Face and Meetings (see "Meeting detection" above).
 
 **Backend** holds the two commands the app runs:
 

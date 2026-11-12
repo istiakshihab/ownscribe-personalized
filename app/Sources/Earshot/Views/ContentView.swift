@@ -133,9 +133,7 @@ struct BannerStack: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(app.banners) { banner in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Image(systemName: banner.kind == .error ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, banner.kind == .error ? Theme.crit : Theme.warn)
+                    icon(banner.kind)
                     Text(banner.text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                     Spacer(minLength: 8)
@@ -146,14 +144,32 @@ struct BannerStack: View {
                         Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
                     }
                     .buttonStyle(.plain).foregroundStyle(Theme.ink3)
-                    .help("Dismiss")
+                    .help(banner.action == .recordMeeting ? "Not now" : "Dismiss")
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
-                .background((banner.kind == .error ? Theme.crit : Theme.warn).opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(tint(banner.kind).opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder((banner.kind == .error ? Theme.crit : Theme.warn).opacity(0.35), lineWidth: 0.5))
+                    .strokeBorder(tint(banner.kind).opacity(0.35), lineWidth: 0.5))
             }
+        }
+    }
+
+    private func tint(_ kind: Banner.Kind) -> Color {
+        switch kind {
+        case .info: return .accentColor
+        case .warning: return Theme.warn
+        case .error: return Theme.crit
+        }
+    }
+
+    @ViewBuilder private func icon(_ kind: Banner.Kind) -> some View {
+        switch kind {
+        case .info:
+            Image(systemName: "video.fill").foregroundStyle(Color.accentColor)
+        case .warning, .error:
+            Image(systemName: kind == .error ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, tint(kind))
         }
     }
 
@@ -180,6 +196,13 @@ struct BannerStack: View {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
                     NSWorkspace.shared.open(url)
                 }
+            }
+            .controlSize(.small)
+        case .recordMeeting:
+            Button {
+                app.recordMeeting()
+            } label: {
+                Label { Text("Record") } icon: { Image(systemName: "record.circle.fill").foregroundStyle(Theme.rec) }
             }
             .controlSize(.small)
         case .dismiss:

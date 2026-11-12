@@ -4,6 +4,7 @@
 Lets a GUI client be built and tested without real capture, permissions or models.
 
     mock_engine.py helper [--session DIR]               # like: ownscribe-audio capture --control stdio
+    mock_engine.py watch-meetings --control stdio       # like: ownscribe-audio watch-meetings --control stdio
     mock_engine.py process SESSION [--events-fd 3]      # like: ownscribe process SESSION --events-fd 3
         [--template meeting|lecture|brief] [--no-diarize] [--no-summarize] [--speed 1.0]
 
@@ -13,10 +14,15 @@ reports where the note would go.
 To see a source die mid-recording, set OWNSCRIBE_MOCK_LOSE to `SOURCE@AT+FOR` items (seconds; FOR `inf` never
 recovers), e.g. `mic@8+4,app:us.zoom.xos@15+inf`, or send `debug_fail_source` like the real helper's tests do.
 
+`watch-meetings` reports `watch_ready`, then one fake call if OWNSCRIBE_MOCK_MEETING is `APP:START[:END]` (APP zoom
+or teams; seconds, divided by --speed; END omitted or `inf` never ends), e.g. `zoom:3:10`. Without it, it idles.
+It exits on `{"cmd":"stop"}` or end of stdin.
+
 It also accepts the real tools' command lines, so a client can point both its `ownscribe` command and
 its capture helper at this script (`mock_engine.py [--speed N] <command> ...`):
 
     capture --session DIR --control stdio [--mic|--no-mic] [--mic-device UID] [--app ID]...  (= helper)
+    watch-meetings --control stdio [--start-after S] [--end-after S] [--interval S] [--debug-commands]
     list-apps --json · list-devices --json
     session new [--output-dir DIR] --json        # default parent: $TMPDIR/ownscribe-mock
     speakers SESSION --set SPEAKER_00=Name ... --events-fd 3
@@ -48,6 +54,7 @@ APPS = {
     "us.zoom.xos": "Zoom",
     "com.google.Chrome": "Google Chrome",
     "com.apple.Music": "Music",
+    "com.microsoft.teams2": "Microsoft Teams",
 }
 MICS = {
     "auto": ("BuiltInMicrophoneDevice", "MacBook Pro Microphone", "built-in", 48000, "auto"),
@@ -78,7 +85,8 @@ class MockHelper:
         self.out_lock = threading.Lock()
         self.stop_reason: str | None = None
         self.sources: dict[str, dict] = {
-            "sys": {"id": "sys", "kind": "system", "name": "System audio", "gain_db": 0.0, "muted": False, "state": "active"},
+            "sys": {"id": "sys", "kind": "system", "name": "System audio", "gain_db": 0.0, "muted": False,
+                    "state": "active"},
         }
         if mic:
             self.sources["mic"] = {"id": "mic", "kind": "mic", "name": "MacBook Pro Microphone", "gain_db": 0.0,
@@ -155,7 +163,8 @@ class MockHelper:
         self.emit("mic", uid=uid_, name=name, transport=transport, rate=rate, reason=reason)
         if self.mic_mode == "auto":
             self.emit("notice", level="info", code="mic_bluetooth",
-                      message="Skipped the default input 'WH-1000XM6': Bluetooth headset mics record in hands-free mode.")
+                      message="Skipped the default input 'WH-1000XM6': "
+                              "Bluetooth headset mics record in hands-free mode.")
 
     def level(self, sid: str, t: float) -> tuple[float | None, float | None]:
         # Speech-like bursts per source; seeded so each source has its own rhythm.
@@ -284,6 +293,74 @@ class MockHelper:
             lost = any(s["state"] == "lost" for s in self.sources.values())
         self.emit("saved", status="partial" if lost else "ok", recording=recording, tracks=tracks, duration=self.t())
         return 2 if lost else 0
+
+
+# ---------------------------------------------------------------- helper (meeting watch) side
+
+WATCH_VERSION = "2.3.0"
+MEETING_APPS = {
+    "zoom": {"app": "zoom", "name": "Zoom", "bundle_id": "us.zoom.xos"},
+    "teams": {"app": "teams", "name": "Microsoft Teams", "bundle_id": "com.microsoft.teams2"},
+}
+
+
+class MockMeetingWatch:
+    """Like `ownscribe-audio watch-meetings --control stdio`, with one fake call from OWNSCRIBE_MOCK_MEETING."""
+
+    def __init__(self, speed: float) -> None:
+        self.speed = max(0.05, speed)
+        self.t0 = time.monotonic()
+        self.out_lock = threading.Lock()
+        self.started_at: float | None = None
+
+    def t(self) -> float:
+        return round(time.monotonic() - self.t0, 3)
+
+    def emit(self, ev: str, **fields) -> None:
+        line = json.dumps({"ev": ev, **fields}, separators=(",", ":"))
+        with self.out_lock:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+
+    def started(self, app: dict) -> None:
+        self.started_at = self.t()
+        self.emit("meeting_started", **app, pid=1000 + list(APPS).index(app["bundle_id"]), t=self.started_at)
+
+    def ended(self, app: dict) -> None:
+        if self.started_at is None:
+            return
+        now = self.t()
+        self.emit("meeting_ended", **app, reason="audio_stopped", duration=round(now - self.started_at, 3), t=now)
+        self.started_at = None
+
+    def schedule(self, spec: str) -> None:
+        """APP:START[:END], in seconds scaled by --speed; END omitted or `inf` never ends."""
+        if not spec:
+            return
+        try:
+            name, start, *rest = spec.split(":")
+            app = MEETING_APPS[name]
+            at = float(start)
+            end = float(rest[0]) if rest and rest[0] else math.inf
+            if len(rest) > 1 or end <= at:
+                raise ValueError
+        except (KeyError, ValueError):
+            print(f"OWNSCRIBE_MOCK_MEETING: ignoring {spec!r} (want zoom|teams:START[:END])", file=sys.stderr)
+            return
+        _later(at / self.speed, self.started, app)
+        if not math.isinf(end):
+            _later(end / self.speed, self.ended, app)
+
+    def run(self) -> int:
+        self.emit("watch_ready", v=WATCH_VERSION, apps=list(MEETING_APPS.values()))
+        self.schedule(os.environ.get("OWNSCRIBE_MOCK_MEETING", "").strip())
+        for raw in sys.stdin:  # debug_process and anything else is ignored
+            try:
+                if json.loads(raw).get("cmd") == "stop":
+                    break
+            except (json.JSONDecodeError, AttributeError):
+                continue
+        return 0
 
 
 # ---------------------------------------------------------------- job (processing) side
@@ -561,6 +638,13 @@ def main() -> int:
     helper.add_argument("--exclude-bundle", action="append", default=[])
     helper.add_argument("--silence-timeout", type=float, default=0)
     helper.add_argument("--source")
+    watch = sub.add_parser("watch-meetings", help="act like ownscribe-audio watch-meetings --control stdio")
+    watch.add_argument("--control", default="stdio")
+    watch.add_argument("--start-after", type=float, default=3.0)
+    watch.add_argument("--end-after", type=float, default=20.0)
+    watch.add_argument("--interval", type=float, default=1.0)
+    watch.add_argument("--debug-commands", action="store_true")
+    watch.add_argument("--speed", type=float, default=1.0, help="time scale for OWNSCRIBE_MOCK_MEETING")
     for name in ("list-apps", "list-devices", "doctor", "templates"):
         sub.add_parser(name).add_argument("--json", action="store_true")
 
@@ -609,6 +693,8 @@ def main() -> int:
 
     if args.mode in ("helper", "capture"):
         return MockHelper(args.session, mic=args.mic, mic_device=args.mic_device, apps=tuple(args.app)).run()
+    if args.mode == "watch-meetings":
+        return MockMeetingWatch(args.speed).run()
     if args.mode == "list-apps":
         apps = [{"bundle_id": b, "name": n, "pid": 1000 + i, "playing": b != "com.apple.Music"}
                 for i, (b, n) in enumerate(APPS.items())]

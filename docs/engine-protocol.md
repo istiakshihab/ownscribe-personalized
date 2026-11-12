@@ -6,6 +6,8 @@ Everything here is JSON over pipes; there is no network listener.
 ```
 GUI ──stdin/stdout JSON lines──▶ ownscribe-audio capture --control stdio   (capture, meters, mixer, merge)
  │
+ ├──stdin/stdout JSON lines────▶ ownscribe-audio watch-meetings --control stdio   (Zoom and Teams calls)
+ │
  └──spawns one process per job──▶ ownscribe <command> SESSION --events-fd 3  (transcribe, diarize, summarize, file)
 
  shared state: the session folder (capture.json written by the helper, session.json by ownscribe)
@@ -17,8 +19,9 @@ GUI ──stdin/stdout JSON lines──▶ ownscribe-audio capture --control std
 - `scripts/mock_engine.py` speaks both halves of this protocol with synthetic data, so a client can
   be built before (and tested without) real capture: `mock_engine.py helper` and
   `mock_engine.py process --events-fd 3`. It also accepts the real tools' command lines (`capture`,
-  `list-apps`, `list-devices`, `session new`, `speakers`, `resummarize`, `doctor`, `templates`), so a
-  client can point both its `ownscribe` command and its helper path at `mock_engine.py [--speed N]`.
+  `watch-meetings`, `list-apps`, `list-devices`, `session new`, `speakers`, `resummarize`, `doctor`,
+  `templates`), so a client can point both its `ownscribe` command and its helper path at
+  `mock_engine.py [--speed N]`.
 
 Conventions for every stream: UTF-8 JSON, one object per line, `\n`-terminated. Unknown fields must be
 ignored by readers; new fields are added without bumping the protocol version. Levels are dBFS;
@@ -199,6 +202,72 @@ that came back leaves only its gap in `capture.json`.
 ```json
 {"apps": [{"bundle_id": "us.zoom.xos", "name": "Zoom", "pid": 812, "playing": true}]}
 ```
+
+### Meeting watch
+
+```
+ownscribe-audio watch-meetings --control stdio
+    [--start-after SECONDS]   # input must have run this long to start a call (default 3)
+    [--end-after SECONDS]     # no input or output for this long ends it (default 20)
+    [--interval SECONDS]      # how often the processes are checked (default 1)
+    [--debug-commands]        # accept debug_process (tests only)
+```
+
+A long-running process that reports Zoom and Microsoft Teams calls, so a client can offer to record one
+when it starts and stop when it ends. It records nothing: it only reads Core Audio's process objects
+(`kAudioProcessPropertyIsRunningInput` and `kAudioProcessPropertyIsRunningOutput`, macOS 14+), so it needs
+no permission. It runs apart from any `capture`, before, during and after recordings.
+
+Processes are matched to an app by bundle ID, which covers each app's helper processes too:
+
+| app | bundle IDs |
+|---|---|
+| `zoom` | `us.zoom.xos`, `us.zoom.*` |
+| `teams` | `com.microsoft.teams2`, `com.microsoft.teams2.*` (new Teams); `com.microsoft.teams`, `com.microsoft.teams.*` (classic) |
+
+Each app is either idle or in a call:
+
+- **Start.** Idle → in a call once one of the app's processes has had input running for `--start-after`
+  seconds. A call holds the mic open; output alone (a notification sound, a video played in the app)
+  never starts one.
+- **End.** In a call → idle when neither input nor output of any of its processes has run for
+  `--end-after` seconds (`reason: "audio_stopped"`), or when none of its processes is left
+  (`reason: "app_quit"`).
+
+#### Events (stdout)
+
+| `ev` | fields |
+|---|---|
+| `watch_ready` | `v` (helper version), `apps`: `[{"app","name","bundle_id"}]`, the apps it watches. Always the first line |
+| `meeting_started` | `app` (`zoom` or `teams`), `name`, `bundle_id` (the app's, as in `watch_ready`), `pid`, `t` |
+| `meeting_ended` | `app`, `name`, `bundle_id`, `reason` (`audio_stopped` or `app_quit`), `duration` (seconds since `meeting_started`), `t` |
+
+`t` is seconds since the watch started. A watch started during a call reports it with `meeting_started`
+once `--start-after` has passed.
+
+```json
+{"ev":"watch_ready","v":"2.3.0","apps":[{"app":"zoom","name":"Zoom","bundle_id":"us.zoom.xos"},{"app":"teams","name":"Microsoft Teams","bundle_id":"com.microsoft.teams2"}]}
+{"ev":"meeting_started","app":"zoom","name":"Zoom","bundle_id":"us.zoom.xos","pid":812,"t":14.0}
+{"ev":"meeting_ended","app":"zoom","name":"Zoom","bundle_id":"us.zoom.xos","reason":"audio_stopped","duration":1830.0,"t":1844.0}
+```
+
+#### Commands (stdin)
+
+| `cmd` | fields | effect |
+|---|---|---|
+| `stop` | — | exit 0 |
+| `debug_process` | `bundle_id`, `pid`, `input`, `output` (bools) | tests only, needs `--debug-commands`: adds a fake process, or updates its running state; the state machine treats it like a real one |
+| `debug_process` | `bundle_id`, `pid`, `gone: true` | tests only: the fake process exits |
+
+Closing stdin is treated as `stop`, and so are SIGINT and SIGTERM. Stopping during a call doesn't send
+`meeting_ended`. As in session mode, a command with an `id` is answered with `ack`, `ping` is accepted,
+and bad input gets an `error` event (`unknown_command`, `bad_json` or `bad_args`; `debug_process` without
+`--debug-commands` is `unknown_command`). Bad flags exit 64.
+
+The usage text (`ownscribe-audio --help`) lists `watch-meetings`; helpers older than 2.3.0 don't have it, so
+a client can look for that word to tell. `mock_engine.py watch-meetings` fakes one call from
+`OWNSCRIBE_MOCK_MEETING=APP:START[:END]` (`zoom` or `teams`; seconds, divided by `--speed`; `END` omitted
+or `inf` never ends), e.g. `zoom:3:10`.
 
 ---
 

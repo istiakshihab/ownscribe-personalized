@@ -67,6 +67,49 @@ final class HelperConnection {
     func terminate() { child?.signal(SIGTERM) }
 }
 
+/// The helper's call watcher (`ownscribe-audio watch-meetings --control stdio`): events on stdout,
+/// `stop` on stdin. Closing stdin also stops it, so it never outlives the app.
+@MainActor
+final class WatchConnection {
+    private var child: ChildProcess?
+    var onEvent: ((JSONObject) -> Void)?
+    var onExit: ((Int32) -> Void)?
+
+    var isRunning: Bool { child?.isRunning ?? false }
+
+    func start(helper: ToolCommand) throws {
+        let args = ["watch-meetings", "--control", "stdio"]
+        AppLog.shared.note("meetings", "start: \(helper.executable) \(helper.arguments(args).joined(separator: " "))")
+        child = try ChildProcess(
+            executable: helper.executable,
+            arguments: helper.arguments(args),
+            environment: ToolCommand.environment,
+            directory: NSHomeDirectory(),
+            streams: .init(stdin: true),
+            onStdoutLine: { [weak self] line in
+                guard let event = JSONObject(line: line) else {
+                    AppLog.shared.write("meetings-stdout", line + Data([0x0A]))
+                    return
+                }
+                DispatchQueue.main.async { self?.onEvent?(event) }
+            },
+            onStderr: { chunk in AppLog.shared.write("meetings", chunk) },
+            onExit: { [weak self] code in
+                MainActor.assumeIsolated {
+                    AppLog.shared.note("meetings", "exited with \(code)")
+                    self?.child = nil
+                    self?.onExit?(code)
+                }
+            }
+        )
+    }
+
+    func stop() {
+        child?.writeLine(JSONLine.encode(["cmd": "stop"]))
+        child?.closeStdin()
+    }
+}
+
 /// One `ownscribe <command> SESSION --events-fd 3` job. Events arrive on fd 3; stdout (the `--json`
 /// result, unused here) is logged with stderr. Cancel is SIGTERM to the direct child only: `uv run`
 /// forwards it to Python, so signalling the whole group would deliver it twice. The job then

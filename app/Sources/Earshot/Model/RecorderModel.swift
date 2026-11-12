@@ -66,7 +66,14 @@ final class RecorderModel {
         var isApp: Bool { kind == "app" || bundleID != nil }
     }
 
+    /// Who started the recording: a call detection started (and will stop) or you.
+    enum Origin: Equatable {
+        case manual
+        case meeting(String)  // MeetingWatcher.Meeting.app
+    }
+
     var phase: Phase = .idle
+    var origin: Origin = .manual
     var strips: [Strip] = []
     var sessionPath: String?
     var elapsed = 0.0
@@ -135,8 +142,9 @@ final class RecorderModel {
         }
     }
 
-    func start() async {
+    func start(origin: Origin = .manual) async {
         guard phase == .idle else { return }
+        self.origin = origin
         lastError = nil
         recoverablePath = nil
         notices = []
