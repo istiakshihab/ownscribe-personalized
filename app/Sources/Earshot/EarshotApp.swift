@@ -19,13 +19,13 @@ struct EarshotApp: App {
         Window("Earshot", id: "main") {
             ContentView(app: model)
         }
-        // First launch: as wide as the layout likes and as tall as the screen allows, so nothing
-        // needs a scroll bar. (After that, macOS reopens the window at the size it was left.)
+        // First launch: a compact window with room for the history sidebar. (After that, macOS
+        // reopens it at the size it was left; it can shrink to the layout's minimum.)
         .defaultWindowPlacement { content, context in
             let visible = context.defaultDisplay.visibleRect
-            let width = min(1300, visible.width - 40)  // room for the history sidebar
-            let minimum = content.sizeThatFits(.init(width: width, height: nil)).height
-            let height = min(visible.height - 40, max(minimum, 940))
+            let width = min(1280, visible.width - 40)  // sidebar, the stages column and the transcript
+            // Not the content's ideal height: the history list would ask for every row.
+            let height = min(visible.height - 40, 760)
             return WindowPlacement(size: CGSize(width: width, height: height))
         }
         .windowResizability(.contentMinSize)

@@ -1,78 +1,61 @@
 import SwiftUI
 
-/// OBS-style vertical mixer: one strip per source. Strips get narrower as sources are added and the
-/// row scrolls sideways past four, inside a fixed width, so the chart keeps its space.
-struct MixerPanel: View {
+/// The mixer as slim rows, one per source (OBS's horizontal layout): meter, level, fader and mute on
+/// one line, so the mixer costs about 30 pt of height per source instead of a full-height column.
+/// It sits under the signal chart, in the same panel. Past four sources the rows scroll.
+struct MixerRows: View {
     let recorder: RecorderModel
-    @ViewState private var showAdd = false
 
-    static let meterHeight: CGFloat = 196
-    static let maxRowWidth: CGFloat = 440
+    static let rowHeight: CGFloat = 30
+    static let spacing: CGFloat = 4
+    static let visibleRows = 4
 
     var body: some View {
         let strips = recorder.visibleStrips
-        let width = Self.stripWidth(count: strips.count)
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                PanelTitle(text: "Mixer")
-                Spacer(minLength: 12)
-                Button {
-                    showAdd.toggle()
-                } label: {
-                    Label("Add source", systemImage: "plus").font(.system(size: 12, weight: .semibold))
-                }
-                .controlSize(.small)
-                .disabled(recorder.phase == .starting || recorder.phase == .stopping)
-                .popover(isPresented: $showAdd, arrowEdge: .bottom) {
-                    AddSourceList(recorder: recorder) { showAdd = false }
-                }
-            }
-            let row = HStack(alignment: .top, spacing: 0) {
-                ForEach(Array(strips.enumerated()), id: \.element.id) { index, strip in
-                    StripView(recorder: recorder, strip: strip, first: index == 0, compact: strips.count >= 3,
-                              twoLineNames: strips.count >= 3)
-                        .frame(width: width + (index == 0 ? 32 : 0))
-                        .padding(.leading, index == 0 ? 0 : 12)
-                        .overlay(alignment: .leading) {
-                            if index > 0 { Rectangle().fill(Theme.wellLine).frame(width: 1) }
-                        }
-                        .padding(.leading, index == 0 ? 0 : 12)
-                        .id(strip.id)
-                }
-            }
-            let natural = Self.rowWidth(count: strips.count)
-            if natural > Self.maxRowWidth {
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal) { row.padding(.bottom, 6) }
-                        .scrollIndicators(.visible)
-                        .frame(width: Self.maxRowWidth)
-                        .onChange(of: strips.count) { old, new in
-                            if new > old, let last = strips.last { withAnimation { proxy.scrollTo(last.id, anchor: .trailing) } }
-                        }
-                }
-            } else {
-                row.frame(width: natural, alignment: .leading)
+        let rows = VStack(spacing: Self.spacing) {
+            ForEach(strips) { strip in
+                MixerRow(recorder: recorder, strip: strip)
+                    .frame(height: Self.rowHeight)
+                    .id(strip.id)
             }
         }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .panel()
-    }
-
-    /// Roomy for two, tighter for three, compact from four.
-    static func stripWidth(count: Int) -> CGFloat { count <= 2 ? 112 : count == 3 ? 96 : 84 }
-
-    static func rowWidth(count: Int) -> CGFloat {
-        guard count > 0 else { return 0 }
-        return CGFloat(count) * stripWidth(count: count) + 32 + CGFloat(count - 1) * 24
+        if strips.count > Self.visibleRows {
+            ScrollViewReader { proxy in
+                ScrollView { rows }
+                    .frame(height: CGFloat(Self.visibleRows) * (Self.rowHeight + Self.spacing) - Self.spacing)
+                    .onChange(of: strips.count) { old, new in
+                        if new > old, let last = strips.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+                    }
+            }
+        } else {
+            rows
+        }
     }
 }
 
-struct StripView: View {
+/// "+ Add source": running apps from `ownscribe-audio list-apps --json`, in a popover.
+struct AddSourceButton: View {
+    let recorder: RecorderModel
+    @ViewState private var showAdd = false
+
+    var body: some View {
+        Button {
+            showAdd.toggle()
+        } label: {
+            Label("Add source", systemImage: "plus")
+        }
+        .controlSize(.small)
+        .disabled(recorder.phase == .starting || recorder.phase == .stopping)
+        .popover(isPresented: $showAdd, arrowEdge: .bottom) {
+            AddSourceList(recorder: recorder) { showAdd = false }
+        }
+    }
+}
+
+/// One source: colour dot and name, a horizontal meter, its level, the fader, gain and mute.
+struct MixerRow: View {
     let recorder: RecorderModel
     let strip: RecorderModel.Strip
-    let first: Bool
-    let compact: Bool
-    let twoLineNames: Bool
 
     static func title(_ strip: RecorderModel.Strip) -> String {
         switch strip.kind {
@@ -109,78 +92,114 @@ struct StripView: View {
 
     var body: some View {
         let dim = strip.muted || strip.state == "lost"
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(alignment: twoLineNames ? .top : .center, spacing: 7) {
-                    Circle().fill(Theme.color(for: strip)).frame(width: 9, height: 9)
-                        .opacity(dim ? 0.35 : 1)
-                        .padding(.top, twoLineNames ? 4 : 0)
-                    Text(Self.title(strip))
-                        .font(.system(size: compact ? 12 : 13, weight: .semibold))
-                        .lineLimit(twoLineNames ? 2 : 1)
-                        .minimumScaleFactor(0.8)  // shrink a long single word rather than break it
-                        .truncationMode(.tail)
-                    Spacer(minLength: 0)
-                    if strip.isApp {
-                        Button {
-                            recorder.removeApp(strip)
-                        } label: {
-                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                                .frame(width: 20, height: 20)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Theme.ink3)
-                        .help("Remove \(Self.title(strip))")
-                        .accessibilityLabel("Remove \(Self.title(strip))")
-                    }
-                }
-                // Same height on every strip, so the meters line up.
-                .frame(height: twoLineNames ? 32 : 20, alignment: .topLeading)
-                Text(subtitle)
-                    .font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
-                    .lineLimit(1).truncationMode(.tail)
-                    .padding(.leading, twoLineNames ? 0 : 16)
+        let title = Self.title(strip)
+        HStack(spacing: 10) {
+            Circle().fill(Theme.color(for: strip)).frame(width: 8, height: 8)
+                .opacity(dim ? 0.35 : 1)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                Text(subtitle).font(.system(size: 11)).foregroundStyle(Theme.ink3).lineLimit(1)
             }
+            .frame(width: 150, alignment: .leading)
+            .help("\(title) · \(subtitle)")
 
-            HStack(spacing: 6) {
+            HorizontalMeter(level: strip.level, peak: strip.peak, muted: dim)
+                .frame(minWidth: 100, maxWidth: .infinity)
+                .frame(height: 8)
+                .accessibilityElement()
+                .accessibilityLabel("\(title) level")
+                .accessibilityValue("\(DB.format(strip.readout)) dB")
+
+            Group {
                 if strip.state == "lost" {
                     Chip(text: "Lost")
                 } else if micSilent {
                     Chip(text: "No signal")
                 } else {
                     Text(strip.muted ? "Muted" : "\(DB.format(strip.readout)) dB")
-                        .font(Theme.mono).monospacedDigit()
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(minHeight: 20)
-
-            HStack(spacing: 8) {
-                if first { ScaleView().frame(width: 24) }
-                MeterView(level: strip.level, peak: strip.peak, muted: dim)
-                    .frame(width: 14)
-                    .accessibilityElement()
-                    .accessibilityLabel("\(Self.title(strip)) level")
-                    .accessibilityValue("\(DB.format(strip.readout)) dB")
-                VerticalFader(value: Binding(get: { strip.gainDb }, set: { recorder.setGain(strip.id, $0) }),
-                              onEnd: { recorder.setGain(strip.id, $0, final: true) },
-                              label: "\(Self.title(strip)) volume")
-                    .frame(width: 30)
-            }
-            .frame(height: MixerPanel.meterHeight)
-            .frame(maxWidth: .infinity)
-
-            HStack(spacing: 8) {
-                MuteButton(muted: strip.muted, compact: compact, label: Self.title(strip)) { recorder.toggleMute(strip.id) }
-                Spacer(minLength: 0)
-                VStack(alignment: .trailing, spacing: 0) {
-                    if !compact { Text("Fader").font(.system(size: 10.5)).foregroundStyle(Theme.ink3) }
-                    Text(DB.formatGain(strip.gainDb) + (compact ? "" : " dB"))
-                        .font(.system(size: compact ? 11 : 12, design: .monospaced)).monospacedDigit()
-                        .foregroundStyle(Theme.ink2)
+                        .font(.system(size: 12, design: .monospaced)).monospacedDigit()
+                        .foregroundStyle(strip.muted ? Theme.ink3 : Theme.ink)
                 }
             }
+            .frame(width: 84, alignment: .trailing)
+
+            Slider(value: Binding(get: { strip.gainDb }, set: { recorder.setGain(strip.id, Self.snap($0)) }),
+                   in: -60...6, step: 0.5) { editing in
+                if !editing { recorder.setGain(strip.id, strip.gainDb, final: true) }
+            }
+            .controlSize(.small)
+            .frame(width: 120)
+            .accessibilityLabel("\(title) volume")
+            .accessibilityValue(DB.formatGain(strip.gainDb) + " dB")
+
+            Text(DB.formatGain(strip.gainDb) + " dB")
+                .font(.system(size: 11, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(Theme.ink2)
+                .frame(width: 58, alignment: .trailing)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { recorder.setGain(strip.id, 0, final: true) }
+                .help("Fader gain · double-click for 0 dB")
+
+            MuteButton(muted: strip.muted, compact: true, label: title) { recorder.toggleMute(strip.id) }
+
+            // Apps can be removed; the column stays so the rows line up.
+            Group {
+                if strip.isApp {
+                    Button {
+                        recorder.removeApp(strip)
+                    } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.ink3)
+                    .help("Remove \(title)")
+                    .accessibilityLabel("Remove \(title)")
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(width: 18)
+        }
+    }
+
+    /// A detent at unity, so 0 dB is easy to hit.
+    static func snap(_ db: Double) -> Double { abs(db) < 0.75 ? 0 : db }
+}
+
+/// Horizontal LED meter: dim zone colours along the scale, the lit level, and a peak-hold tick.
+struct HorizontalMeter: View {
+    let level: Double
+    let peak: Double
+    let muted: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let lvl = DB.fraction(level)
+            let pk = DB.fraction(peak)
+            ZStack(alignment: .leading) {
+                Theme.meterBg
+                Theme.zonesHorizontal.opacity(Theme.zoneDim)
+                Theme.zonesHorizontal
+                    .mask(alignment: .leading) { Rectangle().frame(width: w * lvl) }
+                    .saturation(muted ? 0 : 1)
+                    .opacity(muted ? 0.4 : 1)
+                Canvas { ctx, size in
+                    var x: CGFloat = 4
+                    while x < size.width {
+                        ctx.fill(Path(CGRect(x: x, y: 0, width: 1, height: size.height)), with: .color(Theme.meterGap))
+                        x += 5
+                    }
+                }
+                if pk > 0 {
+                    Rectangle().fill(Theme.ink).frame(width: 2)
+                        .opacity(muted ? 0.25 : 0.75)
+                        .offset(x: w * pk - 1)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 2.5, style: .continuous))
         }
     }
 }
@@ -218,123 +237,6 @@ struct MuteButton: View {
         .controlSize(compact ? .small : .regular)
         .help(muted ? "Unmute \(label)" : "Mute \(label)")
         .accessibilityLabel(muted ? "Unmute \(label)" : "Mute \(label)")
-    }
-}
-
-/// LED-style meter: dim zone colours along the scale, the lit level, and a peak-hold line.
-struct MeterView: View {
-    let level: Double
-    let peak: Double
-    let muted: Bool
-
-    var body: some View {
-        GeometryReader { geo in
-            let h = geo.size.height
-            let lvl = DB.fraction(level)
-            let pk = DB.fraction(peak)
-            ZStack(alignment: .bottom) {
-                Theme.meterBg
-                Theme.zones.opacity(Theme.zoneDim)
-                Theme.zones
-                    .mask(alignment: .bottom) { Rectangle().frame(height: h * lvl) }
-                    .saturation(muted ? 0 : 1)
-                    .opacity(muted ? 0.4 : 1)
-                Canvas { ctx, size in
-                    var y = size.height - 4
-                    while y > 0 {
-                        ctx.fill(Path(CGRect(x: 0, y: y, width: size.width, height: 1)), with: .color(Theme.meterGap))
-                        y -= 5
-                    }
-                }
-                if pk > 0 {
-                    Rectangle().fill(Theme.ink).frame(height: 2)
-                        .opacity(muted ? 0.25 : 0.75)
-                        .offset(y: -(h * pk) + 1)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        }
-    }
-}
-
-/// One dB scale for the whole row, on the first strip.
-struct ScaleView: View {
-    var body: some View {
-        GeometryReader { geo in
-            let h = geo.size.height
-            ForEach([(-60.0, "−60"), (-40, "−40"), (-20, "−20"), (-9, "−9"), (0, "0")], id: \.0) { db, label in
-                Text(label)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Theme.ink3)
-                    .frame(width: 24, alignment: .trailing)
-                    .position(x: 12, y: min(max(h * (1 - DB.fraction(db)), 6), h - 6))
-            }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-/// Vertical fader, −∞ (−60) to +6 dB, drawn like a system slider. Double-click returns it to 0 dB.
-struct VerticalFader: View {
-    @Binding var value: Double
-    var onEnd: (Double) -> Void
-    let label: String
-    static let range = -60.0...6.0
-
-    var body: some View {
-        GeometryReader { geo in
-            let h = geo.size.height
-            let thumbH: CGFloat = 14
-            let travel = h - thumbH
-            let frac = (value - Self.range.lowerBound) / (Self.range.upperBound - Self.range.lowerBound)
-            let thumbY = travel * (1 - frac)
-            ZStack(alignment: .top) {
-                Capsule().fill(Theme.meterBg)
-                    .frame(width: 4)
-                    .frame(maxHeight: .infinity)
-                Capsule().fill(Color.accentColor)
-                    .frame(width: 4, height: max(0, h - thumbY - thumbH / 2))
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                // 0 dB tick
-                Rectangle().fill(Theme.ink3).frame(width: 12, height: 1)
-                    .offset(y: travel * (1 - (0 - Self.range.lowerBound) / (Self.range.upperBound - Self.range.lowerBound)) + thumbH / 2)
-                Capsule()
-                    .fill(Color(light: 0xFFFFFF, dark: 0xD2D2D2))
-                    .overlay(Capsule().strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
-                    .frame(width: 24, height: thumbH)
-                    .offset(y: thumbY)
-            }
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { g in value = Self.value(at: g.location.y, height: h, thumb: thumbH) }
-                    .onEnded { g in onEnd(Self.value(at: g.location.y, height: h, thumb: thumbH)) }
-            )
-            .simultaneousGesture(TapGesture(count: 2).onEnded {
-                value = 0
-                onEnd(0)
-            })
-        }
-        .accessibilityElement()
-        .accessibilityLabel(label)
-        .accessibilityValue(DB.formatGain(value) + " dB")
-        .accessibilityAdjustableAction { direction in
-            let step = direction == .increment ? 1.0 : -1.0
-            let next = min(max(value + step, Self.range.lowerBound), Self.range.upperBound)
-            value = next
-            onEnd(next)
-        }
-        .help("\(label): \(DB.formatGain(value)) dB · double-click for 0 dB")
-    }
-
-    static func value(at y: CGFloat, height: CGFloat, thumb: CGFloat) -> Double {
-        let travel = max(1, height - thumb)
-        let frac = 1 - Double(min(max((y - thumb / 2) / travel, 0), 1))
-        var db = range.lowerBound + frac * (range.upperBound - range.lowerBound)
-        if abs(db) < 0.75 { db = 0 }  // detent at unity
-        return (db * 2).rounded() / 2
     }
 }
 

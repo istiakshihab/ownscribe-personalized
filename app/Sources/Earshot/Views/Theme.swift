@@ -41,6 +41,13 @@ enum Theme {
         .init(color: crit, location: 0.85), .init(color: crit, location: 1),
     ], startPoint: .bottom, endPoint: .top)
 
+    /// The same zones left to right, for the mixer's horizontal meters.
+    static let zonesHorizontal = LinearGradient(stops: [
+        .init(color: good, location: 0), .init(color: good, location: 0.66667),
+        .init(color: warn, location: 0.66667), .init(color: warn, location: 0.85),
+        .init(color: crit, location: 0.85), .init(color: crit, location: 1),
+    ], startPoint: .leading, endPoint: .trailing)
+
     static let mono = Font.system(size: 13, design: .monospaced)
 }
 

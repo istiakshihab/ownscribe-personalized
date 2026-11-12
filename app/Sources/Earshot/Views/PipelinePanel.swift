@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// After recording: Transcription → Diarization → Summarization → Obsidian, then the results.
+/// After recording: Transcription → Diarization → Summarization → Obsidian in a column, the
+/// transcript and summary beside it.
 struct PipelinePanel: View {
     let app: AppModel
     /// This window's recording, or a past one opened from the sidebar.
@@ -10,10 +11,13 @@ struct PipelinePanel: View {
     var hint = "Runs on this Mac when you press Stop"
     @ViewState private var tab = Tab.transcript
 
+    /// Room for the widest card's title beside its switch (Summarization) and the template picker.
+    static let stagesWidth: CGFloat = 214
+
     enum Tab: Hashable { case transcript, summary }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 PanelTitle(text: "After recording")
                 Spacer()
@@ -24,15 +28,20 @@ struct PipelinePanel: View {
                     Text(hint).font(.system(size: 11)).foregroundStyle(Theme.ink3)
                 }
             }
-            HStack(alignment: .top, spacing: 14) {
-                transcriptionCard
-                diarizationCard
-                summarizationCard
-                vaultCard
+            HStack(alignment: .top, spacing: 12) {
+                // The stages, top to bottom, each at its natural height.
+                VStack(spacing: 8) {
+                    transcriptionCard
+                    diarizationCard
+                    summarizationCard
+                    vaultCard
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: Self.stagesWidth)
+                results
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
-            .fixedSize(horizontal: false, vertical: true)
-            results
-                .frame(maxHeight: .infinity, alignment: .top)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .panel()
@@ -52,11 +61,11 @@ struct PipelinePanel: View {
         StageCard(title: "Transcription", status: pipeline.transcription.status, off: false, accessory: {
             EmptyView()
         }) {
-            Text(whisperLabel).font(.system(size: 12)).foregroundStyle(Theme.ink3)
+            Text(whisperLabel).font(.system(size: 12)).foregroundStyle(Theme.ink3).lineLimit(1).help(whisperLabel)
             ProgressBar(fraction: pipeline.preparingModels ? nil : (pipeline.transcription.status == .done ? 1 : pipeline.transcription.fraction ?? 0),
                         indeterminate: pipeline.preparingModels)
                 .accessibilityLabel("Transcription progress")
-            Text(pipeline.transcriptionFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(4).help(pipeline.transcriptionFoot).monospacedDigit()
+            Text(pipeline.transcriptionFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(2).help(pipeline.transcriptionFoot).monospacedDigit()
         }
     }
 
@@ -66,8 +75,11 @@ struct PipelinePanel: View {
             Toggle("Diarization", isOn: $p.diarizeOn).labelsHidden().toggleStyle(.switch).controlSize(.mini)
                 .disabled(pipeline.isProcessing)
         }) {
-            Text("pyannote · then you name speakers").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+            Text("pyannote · then you name speakers").font(.system(size: 12)).foregroundStyle(Theme.ink3).lineLimit(1)
+                .help("pyannote finds who spoke when; then you name the speakers")
                 .opacity(pipeline.diarizationOff ? 0.45 : 1)
+            // The four sub-steps only while they run; afterwards the line below says how it went.
+            if pipeline.diarization.status == .running {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(PipelineModel.diarizationSteps, id: \.self) { step in
                     HStack(spacing: 8) {
@@ -81,7 +93,8 @@ struct PipelinePanel: View {
                 }
             }
             .opacity(pipeline.diarizationOff ? 0.45 : 1)
-            Text(pipeline.diarizationFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(4).help(pipeline.diarizationFoot)
+            }
+            Text(pipeline.diarizationFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(2).help(pipeline.diarizationFoot)
             if pipeline.diarization.status == .failed, pipeline.diarization.message?.contains("Hugging Face") == true {
                 HuggingFaceSettingsButton()
             }
@@ -94,38 +107,34 @@ struct PipelinePanel: View {
             Toggle("Summarization", isOn: $p.summarizeOn).labelsHidden().toggleStyle(.switch).controlSize(.mini)
                 .disabled(pipeline.isProcessing)
         }) {
-            Text(app.doctor?.summarizerLabel ?? "Your summary template").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+            Text(app.doctor?.summarizerLabel ?? "Your summary template").font(.system(size: 12)).foregroundStyle(Theme.ink3).lineLimit(1)
                 .opacity(pipeline.summarizationOff ? 0.45 : 1)
             Picker("Summary template", selection: Binding(get: { pipeline.template }, set: { pipeline.selectTemplate($0) })) {
                 ForEach(pipeline.templates, id: \.self) { Text($0.capitalized).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .controlSize(.small)
+            .controlSize(.mini)
             .fixedSize()
             .disabled(pipeline.isRunning && pipeline.jobCommand != "process")
             if pipeline.summarization.status == .running {
                 ProgressBar(fraction: pipeline.downloadFraction, indeterminate: pipeline.downloadFraction == nil)
             }
-            Text(pipeline.summarizationFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(4).help(pipeline.summarizationFoot).monospacedDigit()
+            Text(pipeline.summarizationFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(2).help(pipeline.summarizationFoot).monospacedDigit()
         }
     }
 
     private var vaultCard: some View {
         StageCard(title: "Obsidian", status: pipeline.vault.status, off: pipeline.vaultOff, accessory: {
-            if let settings = pipeline.vaultSettings, !pipeline.vaultOff {
-                Text(settings.asks ? "Asks first" : "Automatic").font(.system(size: 11)).foregroundStyle(Theme.ink3)
-                    .help(settings.asks ? "[obsidian] confirm_before_filing = true: you see the note before it's filed"
-                                        : "[obsidian] confirm_before_filing = false: filed as soon as the transcript is ready")
-            }
+            EmptyView()
         }) {
-            Text(pipeline.vaultSettings.map { "Claude · \($0.name) vault" } ?? "Claude · your vault")
-                .font(.system(size: 12)).foregroundStyle(Theme.ink3)
+            Text(vaultSubtitle).font(.system(size: 12)).foregroundStyle(Theme.ink3).lineLimit(1)
+                .help(vaultHelp)
                 .opacity(pipeline.vaultOff ? 0.45 : 1)
             if pipeline.vault.status == .running {
                 ProgressBar(fraction: nil, indeterminate: true)
             }
-            Text(pipeline.vaultFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(4).help(pipeline.vaultFoot)
+            Text(pipeline.vaultFoot).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(2).help(pipeline.vaultFoot)
             if let note = pipeline.vaultNote {
                 HStack(spacing: 8) {
                     Button("Open in Obsidian") { note.open() }.controlSize(.small)
@@ -144,6 +153,19 @@ struct PipelinePanel: View {
                 .controlSize(.small)
             }
         }
+    }
+
+    /// "Claude · Personal vault · asks first"
+    private var vaultSubtitle: String {
+        guard let settings = pipeline.vaultSettings else { return "Claude · your vault" }
+        let mode = pipeline.vaultOff ? "" : settings.asks ? " · asks first" : " · automatic"
+        return "Claude · \(settings.name) vault" + mode
+    }
+
+    private var vaultHelp: String {
+        guard let settings = pipeline.vaultSettings else { return "Files the recording into your Obsidian vault" }
+        return settings.asks ? "[obsidian] confirm_before_filing = true: you see the note before it's filed"
+                             : "[obsidian] confirm_before_filing = false: filed as soon as the transcript is ready"
     }
 
     private var whisperLabel: String {
@@ -197,7 +219,7 @@ struct PipelinePanel: View {
                 case .summary: summaryPane
                 }
             }
-            .frame(minHeight: 110, maxHeight: .infinity, alignment: .topLeading)
+            .frame(minHeight: 60, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -246,9 +268,9 @@ struct StageCard<Accessory: View, Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                StatusIcon(status: off ? .skipped : status, size: 20)
+                StatusIcon(status: off ? .skipped : status, size: 18)
                 Text(title).font(.system(size: 13, weight: .semibold)).opacity(off ? 0.45 : 1)
                     .lineLimit(1)
                     .layoutPriority(1)
@@ -257,8 +279,8 @@ struct StageCard<Accessory: View, Content: View>: View {
             }
             content()
         }
-        .padding(.init(top: 12, leading: 14, bottom: 14, trailing: 14))
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.init(top: 10, leading: 12, bottom: 10, trailing: 12))
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .well()
         .accessibilityElement(children: .contain)
     }
@@ -367,7 +389,7 @@ struct TranscriptList: View {
                                     }
                                 }
                                 .lineLimit(1).truncationMode(.tail)
-                                .frame(width: 112, alignment: .leading)
+                                .frame(width: 96, alignment: .leading)
                             }
                             Text(seg.text).font(.system(size: 13)).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)

@@ -30,7 +30,7 @@ struct ContentView: View {
                     RecordButton(app: app)
                 }
             }
-            .frame(minWidth: 880)
+            .frame(minWidth: 760)  // the mixer rows, the stages column and a readable transcript
         }
         .task { await app.launch() }
     }
@@ -43,26 +43,22 @@ struct RecorderView: View {
     var body: some View {
         // No page scrolling: the fixed parts sit on top and the results area (transcript, summary)
         // takes whatever height is left, scrolling inside itself.
-        VStack(spacing: 14) {
+        VStack(spacing: 10) {
             if !app.banners.isEmpty { BannerStack(app: app) }
-            HStack(alignment: .top, spacing: 14) {
-                SignalPanel(recorder: app.recorder)
-                    .frame(minWidth: 320)
-                MixerPanel(recorder: app.recorder)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .fixedSize(horizontal: false, vertical: true)
             HStack(alignment: .top, spacing: 16) {
                 MicPicker(recorder: app.recorder)
                 SaveLocationPicker(app: app)
             }
             .padding(.horizontal, 4)
+            // The signal strip with the mixer's rows under it, then the stages and the transcript,
+            // which get the full width and whatever height is left.
+            SignalPanel(recorder: app.recorder)
             PipelinePanel(app: app, pipeline: app.pipeline)
                 .frame(maxHeight: .infinity)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
-        .padding(.bottom, 18)
+        .padding(.horizontal, 14)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
         .frame(maxWidth: 1100, maxHeight: .infinity, alignment: .top)
         .frame(maxWidth: .infinity)
         .navigationTitle("Earshot")

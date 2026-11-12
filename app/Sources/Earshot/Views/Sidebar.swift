@@ -126,7 +126,7 @@ struct SessionDetailView: View {
     let item: HistoryItem
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             if !app.banners.isEmpty { BannerStack(app: app) }
             if let pipeline = app.pipeline(for: item.id) {
                 header(pipeline)
@@ -136,9 +136,9 @@ struct SessionDetailView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
-        .padding(.bottom, 18)
+        .padding(.horizontal, 14)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
         .frame(maxWidth: 1100, maxHeight: .infinity, alignment: .top)
         .frame(maxWidth: .infinity)
         .navigationTitle(item.title)

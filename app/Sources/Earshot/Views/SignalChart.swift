@@ -1,22 +1,26 @@
 import SwiftUI
 
-/// "Total signal": the mix of every source after faders and mutes over the last 60 s.
+/// "Total signal": the mix of every source after faders and mutes over the last 60 s, with the
+/// mixer's rows underneath.
 struct SignalPanel: View {
     let recorder: RecorderModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 PanelTitle(text: "Total signal")
                 Text("\(DB.format(recorder.totalReadout)) dBFS")
                     .font(Theme.mono).monospacedDigit().foregroundStyle(Theme.ink)
                 Spacer(minLength: 8)
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(Theme.ink3).lineLimit(1)
+                AddSourceButton(recorder: recorder)
             }
             SignalChart(recorder: recorder)
-                .frame(minHeight: 180, maxHeight: .infinity)
+                .frame(height: 78)
+            Divider().padding(.vertical, 2)
+            MixerRows(recorder: recorder)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .panel()
     }
 
@@ -88,7 +92,9 @@ struct SignalChart: View {
         let g = geometry(size, now: now)
         let labelFont = Font.system(size: 10, design: .monospaced)
 
-        for db in [-60.0, -40, -20, 0] {
+        // A short strip has room for three labelled gridlines, a tall chart for four.
+        let plotHeight = size.height - pad.t - pad.b
+        for db in plotHeight < 80 ? [-60.0, -30, 0] : [-60.0, -40, -20, 0] {
             let y = (g.y(db)).rounded() + 0.5
             var line = Path()
             line.move(to: CGPoint(x: pad.l, y: y))
@@ -163,7 +169,7 @@ struct SignalChart: View {
             Text(ago == 0 ? "now" : "\(ago) s ago").font(.system(size: 11)).foregroundStyle(Theme.ink3)
             row(nil, "Total", "\(DB.format(s.total)) dBFS")
             ForEach(strips) { strip in
-                row(Theme.color(for: strip), StripView.title(strip), DB.format(s.levels[strip.id] ?? -.infinity))
+                row(Theme.color(for: strip), MixerRow.title(strip), DB.format(s.levels[strip.id] ?? -.infinity))
             }
         }
         .frame(minWidth: 150, alignment: .leading)

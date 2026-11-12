@@ -30,7 +30,8 @@ struct MicPicker: View {
     let recorder: RecorderModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
             FieldLabel(text: "Microphone")
             Picker("Microphone", selection: Binding(get: { recorder.micChoice }, set: { recorder.setMic($0) })) {
                 Text("Automatic").tag(MicChoice.auto)
@@ -44,9 +45,19 @@ struct MicPicker: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
-            Text(detail).font(.callout).foregroundStyle(Theme.ink3).lineLimit(1)
+            .frame(maxWidth: 280)
+            }
             let hint = self.hint
-            if !hint.text.isEmpty { Hint(text: hint.text, warning: hint.warning) }
+            HStack(spacing: 4) {
+                Text(detail).font(.callout).foregroundStyle(Theme.ink3).lineLimit(1).truncationMode(.middle)
+                // Explanations take no room until asked for; warnings stay visible below.
+                if !hint.text.isEmpty && !hint.warning {
+                    Image(systemName: "info.circle").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                        .help(hint.text)
+                        .accessibilityLabel(hint.text)
+                }
+            }
+            if hint.warning { Hint(text: hint.text, warning: true) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await recorder.refreshDevices() }
@@ -116,9 +127,9 @@ struct SaveLocationPicker: View {
     @ViewState private var recents = Prefs.recents
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            FieldLabel(text: "Save to")
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
+                FieldLabel(text: "Save to")
                 Picker("Save to", selection: $chosen) {
                     Text(app.defaultOutputDir.abbreviatingHome + " (default)").tag("")
                     let others = folders
@@ -138,7 +149,7 @@ struct SaveLocationPicker: View {
             .disabled(app.recorder.phase == .starting)
             Text("Next file: " + nextPath)
                 .font(.callout).foregroundStyle(Theme.ink3)
-                .lineLimit(2).truncationMode(.middle)
+                .lineLimit(1).truncationMode(.middle)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -96,7 +96,8 @@ the jobs it starts: the saved token is what diarization uses, however the app wa
 - `Model/` — `RecorderModel` (helper lifecycle, mixer, meters, mic, notices), `PipelineModel`
   (jobs, stages, transcript, speakers, summary), `LevelHistory` (the last 60 s, averaged into fixed
   0.25 s buckets so the past never reshapes), `AppModel` (wiring, doctor, banners).
-- `Views/` — title bar (toolbar), signal chart, mixer strips, pickers, after-recording panel, Settings.
+- `Views/` — title bar (toolbar), signal chart with the mixer's rows (one line per source) under it,
+  pickers, after-recording panel, Settings.
 
 Notes:
 
